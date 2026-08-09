@@ -49,15 +49,16 @@ export const nodeDiscordSleeper: DiscordSleeper = async (delayMs, signal) => {
       reject(signal.reason);
       return;
     }
-    const done = (): void => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    };
-    const timer = setTimeout(done, delayMs);
+    let timer: ReturnType<typeof setTimeout>;
     const abort = (): void => {
       clearTimeout(timer);
       reject(signal.reason);
     };
+    const done = (): void => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    timer = setTimeout(done, delayMs);
     signal.addEventListener("abort", abort, { once: true });
     timer.unref?.();
   });

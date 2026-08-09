@@ -16,11 +16,23 @@ export interface DiscordInteractionBinding<TInteraction extends DiscordInteracti
   handle(interaction: TInteraction, signal?: AbortSignal): Promise<boolean>;
 }
 
-const bounded = async <T>(operation: Promise<T>, timeoutMs: number): Promise<T> => {
-  const signal = AbortSignal.timeout(timeoutMs);
+const bounded = async <T>(operation: Promise<T>, signal: AbortSignal): Promise<T> => {
   return Promise.race([
     operation,
     new Promise<never>((_resolve, reject) => {
+      if (signal.aborted) {
+        reject(
+          new DiscordCoreError(
+            "DISCORD_TIMEOUT",
+            "Discord interaction handler exceeded its deadline.",
+            true,
+            null,
+            null,
+            signal.reason,
+          ),
+        );
+        return;
+      }
       signal.addEventListener(
         "abort",
         () =>
@@ -55,6 +67,9 @@ export class DiscordIngressRouter<TInteraction extends DiscordInteractionLike> {
       handlerTimeoutMs > 60_000
     ) {
       throw new RangeError("Discord handler timeout must be from 100 to 60000 ms.");
+    }
+    if (bindings.length > 100 || interactions.length > 100) {
+      throw new RangeError("Discord router binding limit exceeded.");
     }
     const commands = new Map<string, DiscordCommandBinding<TInteraction>>();
     for (const binding of bindings) {
@@ -91,12 +106,12 @@ export class DiscordIngressRouter<TInteraction extends DiscordInteractionLike> {
       const commandName = interaction.commandName;
       const command = commandName === undefined ? undefined : this.commands.get(commandName);
       if (command !== undefined) {
-        await bounded(command.handle(interaction, signal), this.handlerTimeoutMs);
+        await bounded(command.handle(interaction, signal), signal);
         return true;
       }
     }
     for (const binding of this.interactions) {
-      if (await bounded(binding.handle(interaction, signal), this.handlerTimeoutMs)) return true;
+      if (await bounded(binding.handle(interaction, signal), signal)) return true;
     }
     return false;
   }

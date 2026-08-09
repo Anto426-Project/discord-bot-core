@@ -183,6 +183,7 @@ const localizedBase = (
 
 const mapCompletion = <TValue extends string | number>(
   completion: CommandCompletion<TValue> | undefined,
+  valueKind: "string" | "integer" | "number",
 ): Readonly<Record<string, unknown>> => {
   if (completion === undefined) return Object.freeze({});
   if (completion.kind === "autocomplete") return Object.freeze({ autocomplete: true });
@@ -196,11 +197,23 @@ const mapCompletion = <TValue extends string | number>(
         for (const value of Object.values(choice.name)) {
           if (value.length < 1 || value.length > 100) invalid("Discord choice name is invalid.");
         }
+        if (
+          (valueKind === "string" && typeof choice.value !== "string") ||
+          (valueKind !== "string" && typeof choice.value !== "number")
+        ) {
+          invalid("Discord choice value type does not match its option.");
+        }
         if (typeof choice.value === "string" && (choice.value.length < 1 || choice.value.length > 100)) {
           invalid("Discord string choice value is invalid.");
         }
-        if (typeof choice.value === "number" && !Number.isFinite(choice.value)) {
-          invalid("Discord numeric choice value is invalid.");
+        if (
+          typeof choice.value === "number" &&
+          (!Number.isFinite(choice.value) || Math.abs(choice.value) > Number.MAX_SAFE_INTEGER)
+        ) {
+          invalid("Discord numeric choice value is outside the supported range.");
+        }
+        if (valueKind === "integer" && !Number.isSafeInteger(choice.value)) {
+          invalid("Discord integer choice value must be a safe integer.");
         }
         return Object.freeze({
           name: choice.name.en,
@@ -212,13 +225,60 @@ const mapCompletion = <TValue extends string | number>(
   });
 };
 
+const localizedLength = (value: LocalizedCommandText): number =>
+  value.it.length + value.en.length;
+
+const completionTextLength = (
+  completion: CommandCompletion<string | number> | undefined,
+): number =>
+  completion?.kind === "choices"
+    ? completion.values.reduce(
+        (total, choice) =>
+          total +
+          localizedLength(choice.name) +
+          (typeof choice.value === "string" ? choice.value.length : 0),
+        0,
+      )
+    : 0;
+
+const optionTextLength = (option: CommandOption): number => {
+  const own = localizedLength(option.name) + localizedLength(option.description);
+  switch (option.kind) {
+    case "subcommand_group":
+      return own + option.options.reduce((total, child) => total + optionTextLength(child), 0);
+    case "subcommand":
+      return own + option.options.reduce((total, child) => total + optionTextLength(child), 0);
+    case "string":
+    case "integer":
+    case "number":
+      return own + completionTextLength(option.completion as CommandCompletion<string | number> | undefined);
+    default:
+      return own;
+  }
+};
+
 const assertRange = (
   minimum: number | undefined,
   maximum: number | undefined,
   label: string,
+  integer: boolean,
 ): void => {
-  if (minimum !== undefined && !Number.isFinite(minimum)) invalid(`${label} minimum is invalid.`);
-  if (maximum !== undefined && !Number.isFinite(maximum)) invalid(`${label} maximum is invalid.`);
+  if (
+    minimum !== undefined &&
+    (!Number.isFinite(minimum) ||
+      Math.abs(minimum) > Number.MAX_SAFE_INTEGER ||
+      (integer && !Number.isSafeInteger(minimum)))
+  ) {
+    invalid(`${label} minimum is invalid.`);
+  }
+  if (
+    maximum !== undefined &&
+    (!Number.isFinite(maximum) ||
+      Math.abs(maximum) > Number.MAX_SAFE_INTEGER ||
+      (integer && !Number.isSafeInteger(maximum)))
+  ) {
+    invalid(`${label} maximum is invalid.`);
+  }
   if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
     invalid(`${label} minimum cannot exceed maximum.`);
   }
@@ -243,27 +303,27 @@ const mapBasicOption = (option: BasicCommandOption): Readonly<Record<string, unk
     }
     case "integer":
     case "number": {
-      assertRange(option.minValue, option.maxValue, option.kind);
+      assertRange(option.minValue, option.maxValue, option.kind, option.kind === "integer");
       return Object.freeze({
         ...base,
         type: OPTION_TYPES[option.kind],
-        ...mapCompletion(option.completion),
+        ...mapCompletion(option.completion, option.kind),
         ...(option.minValue === undefined ? {} : { min_value: option.minValue }),
         ...(option.maxValue === undefined ? {} : { max_value: option.maxValue }),
       });
     }
     case "string": {
-      assertRange(option.minLength, option.maxLength, "string length");
+      assertRange(option.minLength, option.maxLength, "string length", true);
       if (
-        (option.minLength !== undefined && (!Number.isSafeInteger(option.minLength) || option.minLength < 0)) ||
-        (option.maxLength !== undefined && (!Number.isSafeInteger(option.maxLength) || option.maxLength > 6_000))
+        (option.minLength !== undefined && (option.minLength < 0 || option.minLength > 6_000)) ||
+        (option.maxLength !== undefined && (option.maxLength < 1 || option.maxLength > 6_000))
       ) {
         invalid("Discord string length constraint is invalid.");
       }
       return Object.freeze({
         ...base,
         type: OPTION_TYPES.string,
-        ...mapCompletion(option.completion),
+        ...mapCompletion(option.completion, "string"),
         ...(option.minLength === undefined ? {} : { min_length: option.minLength }),
         ...(option.maxLength === undefined ? {} : { max_length: option.maxLength }),
       });
@@ -271,8 +331,35 @@ const mapBasicOption = (option: BasicCommandOption): Readonly<Record<string, unk
   }
 };
 
+const assertUniqueSiblingOptions = (
+  options: readonly CommandOption[] | readonly BasicCommandOption[] | readonly SubcommandOption[],
+  label: string,
+): void => {
+  const namesByLocale: Record<SupportedCommandLocale, Set<string>> = {
+    it: new Set<string>(),
+    en: new Set<string>(),
+  };
+  let optionalSeen = false;
+  for (const option of options) {
+    for (const locale of ["it", "en"] as const) {
+      const name = option.name[locale];
+      if (namesByLocale[locale].has(name)) {
+        invalid(`${label} contains duplicate ${locale} option names.`);
+      }
+      namesByLocale[locale].add(name);
+    }
+    if ("required" in option) {
+      if (!option.required) optionalSeen = true;
+      if (option.required && optionalSeen) {
+        invalid(`${label} must place required options before optional options.`);
+      }
+    }
+  }
+};
+
 const mapSubcommand = (option: SubcommandOption): Readonly<Record<string, unknown>> => {
   if (option.options.length > 25) invalid("Discord subcommand option limit exceeded.");
+  assertUniqueSiblingOptions(option.options, "Subcommand");
   return Object.freeze({
     ...localizedBase(option.name, option.description, "Subcommand"),
     type: OPTION_TYPES.subcommand,
@@ -286,6 +373,7 @@ const mapOption = (option: CommandOption): Readonly<Record<string, unknown>> => 
     if (option.options.length < 1 || option.options.length > 25) {
       invalid("Discord subcommand group size is invalid.");
     }
+    assertUniqueSiblingOptions(option.options, "Subcommand group");
     return Object.freeze({
       ...localizedBase(option.name, option.description, "Subcommand group"),
       type: OPTION_TYPES.subcommand_group,
@@ -308,6 +396,14 @@ export const toDiscordApplicationCommand = (
 ): DiscordApplicationCommandBody => {
   parseStableBotKey(command.key, "command key");
   if (command.options.length > 25) invalid("Discord command option limit exceeded.");
+  assertUniqueSiblingOptions(command.options, "Command");
+  const textBudget =
+    localizedLength(command.name) +
+    localizedLength(command.description) +
+    command.options.reduce((total, option) => total + optionTextLength(option), 0);
+  if (textBudget > 8_000) {
+    invalid("Discord command text exceeds the aggregate 8000 character limit.");
+  }
   const hasSubcommands = command.options.some(
     (option) => option.kind === "subcommand" || option.kind === "subcommand_group",
   );
