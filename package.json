@@ -1,0 +1,57 @@
+{
+  "name": "@anto-project/discord-bot-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Domain-neutral Discord communication, payload-safety and runtime primitives for Anto-Project bots.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Anto426-Project/discord-bot-core.git"
+  },
+  "dependencies": {
+    "@anto-project/dynamic-embed-engine": "file:vendor/dynamic-embed-engine"
+  },
+  "bundleDependencies": [
+    "@anto-project/dynamic-embed-engine"
+  ],
+  "scripts": {
+    "clean": "node --eval \"import('node:fs').then(({rmSync}) => rmSync('dist', { recursive: true, force: true }))\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --import tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm run test",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "ci": "npm run check && npm run package:smoke",
+    "prepare": "npm run build",
+    "prepack": "npm run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.2",
+    "tsx": "4.23.9",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "@anto-project/dynamic-embed-engine@0.1.0": true,
+    "esbuild@0.28.1": true
+  },
+  "license": "UNLICENSED"
+}

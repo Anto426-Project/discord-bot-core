@@ -1,0 +1,3 @@
+[submodule "vendor/dynamic-embed-engine"]
+	path = vendor/dynamic-embed-engine
+	url = https://github.com/Anto426-Project/dynamic-embed-engine.git
