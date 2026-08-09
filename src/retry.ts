@@ -60,7 +60,6 @@ export const nodeDiscordSleeper: DiscordSleeper = async (delayMs, signal) => {
     };
     timer = setTimeout(done, delayMs);
     signal.addEventListener("abort", abort, { once: true });
-    timer.unref?.();
   });
 };
 
@@ -91,7 +90,7 @@ export const executeWithDiscordRetry = async <T>(input: {
       const requested = decision.retryAfterMs;
       if (
         requested !== undefined &&
-        (!Number.isFinite(requested) || requested < 0 || requested > 60_000)
+        (!Number.isSafeInteger(requested) || requested < 0 || requested > 86_400_000)
       ) {
         throw new DiscordCoreError(
           "DISCORD_RESPONSE_INVALID",
@@ -102,10 +101,16 @@ export const executeWithDiscordRetry = async <T>(input: {
           error,
         );
       }
+      // A provider Retry-After is a lower bound. Retrying earlier would violate
+      // Discord's rate limit. If this process is unwilling to wait that long,
+      // surface the original rate-limit error to a durable scheduler instead.
+      if (requested !== undefined && requested > policy.maximumDelayMs) {
+        throw error;
+      }
       const delay =
         requested === undefined
           ? exponential
-          : Math.min(policy.maximumDelayMs, Math.max(exponential, requested));
+          : Math.max(exponential, requested);
       await sleep(delay, signal);
     }
   }

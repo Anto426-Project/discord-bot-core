@@ -1,6 +1,7 @@
 export type DiscordCoreErrorCode =
   | "DISCORD_INVALID_INPUT"
   | "DISCORD_PAYLOAD_REJECTED"
+  | "DISCORD_CANCELLED"
   | "DISCORD_TIMEOUT"
   | "DISCORD_NETWORK_FAILURE"
   | "DISCORD_RATE_LIMITED"
@@ -36,15 +37,12 @@ export class DiscordCoreError extends Error {
     public readonly retryable: boolean,
     public readonly providerStatus: number | null = null,
     public readonly retryAfterMs: number | null = null,
-    cause?: unknown,
+    _cause?: unknown,
   ) {
-    const sanitizedCause =
-      cause instanceof Error
-        ? new Error(redactDiscordSensitiveText(cause.message).slice(0, SUMMARY_MAX_LENGTH))
-        : typeof cause === "string"
-          ? new Error(redactDiscordSensitiveText(cause).slice(0, SUMMARY_MAX_LENGTH))
-          : undefined;
-    super(safeSummary(summary), sanitizedCause === undefined ? undefined : { cause: sanitizedCause });
+    // Provider/native causes are deliberately not retained. Generic redaction
+    // cannot prove that an unknown error message does not contain the exact bot
+    // token, interaction token or provider response body.
+    super(safeSummary(summary));
     this.name = "DiscordCoreError";
     this.safeSummary = safeSummary(summary);
   }
@@ -57,6 +55,10 @@ export class DiscordCoreError extends Error {
       providerStatus: this.providerStatus,
       retryAfterMs: this.retryAfterMs,
     });
+  }
+
+  public toJSON(): SafeDiscordCoreError {
+    return this.toSafeRecord();
   }
 }
 

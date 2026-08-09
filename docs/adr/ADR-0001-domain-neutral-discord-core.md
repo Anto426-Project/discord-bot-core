@@ -18,6 +18,13 @@ palette and embed-plan mechanics are owned by the separately versioned
 `dynamic-embed-engine` submodule and re-exported for bot consumers. Product
 processes inject all identity, destination and business decisions.
 
+The concrete Discord SDK is a private dependency of the Node adapter. Public
+package contracts use only core-owned DTOs and ports. This allows the SDK to be
+upgraded or replaced without spreading provider classes through product code.
+Low-level provider operations may be implemented by the core, while fan-out,
+destination selection, templates, localization, authorization and delivery
+policy remain in their owning product.
+
 The package is not a service. It has no service key, listener, database,
 runtime lease, diagnostics endpoint, environment reader or private key.
 Antobot and UniBot pin the package independently as a Git submodule and never
@@ -28,7 +35,14 @@ share live state or credentials.
 - security fixes can be applied once and adopted by both processes;
 - Antobot retains its complete general-purpose feature set above the core;
 - UniBot remains a small University-owned adapter/runtime;
+- Antobot and UniBot never gain a runtime dependency on one another by sharing
+  code;
 - no shared API can create a trusted human actor or authorize a business
   action;
 - provider failure changes delivery state only and cannot mutate product
   business state.
+
+This is an implementation choice compatible with the architecture master,
+not a new authority described by it. Protected cross-domain business calls
+continue to pass through AccessBroker and never fall back to a direct
+Antobot-to-University connection.

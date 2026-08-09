@@ -57,7 +57,14 @@ export const discordInteractionCorrelationId = (interactionId: string): string =
   ].join("-");
 };
 
-export const deterministicDiscordNonce = (deliveryId: string): string => {
+export const deterministicDiscordNonce = (
+  deliveryId: string,
+  destinationId: string,
+): string => {
   const normalized = parseStableBotKey(deliveryId, "deliveryId");
-  return createHash("sha256").update(`discord-delivery:${normalized}`, "utf8").digest("hex").slice(0, 25);
+  const destination = parseDiscordSnowflake(destinationId, "Discord delivery destination");
+  return createHash("sha256")
+    .update(`discord-delivery:${destination}:${normalized}`, "utf8")
+    .digest("hex")
+    .slice(0, 25);
 };

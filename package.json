@@ -15,24 +15,26 @@
       "default": "./dist/index.js"
     },
     "./node": {
-      "types": "./dist/node.d.ts",
-      "default": "./dist/node.js"
+      "types": "./dist/discordjs.d.ts",
+      "default": "./dist/discordjs.js"
     }
   },
   "files": [
     "dist",
+    "src",
+    "vendor/dynamic-embed-engine/dist",
+    "vendor/dynamic-embed-engine/package.json",
+    "vendor/dynamic-embed-engine/README.md",
     "README.md"
   ],
+  "sideEffects": false,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Anto426-Project/discord-bot-core.git"
   },
   "dependencies": {
-    "@anto-project/dynamic-embed-engine": "file:vendor/dynamic-embed-engine"
+    "discord.js": "14.27.0"
   },
-  "bundleDependencies": [
-    "@anto-project/dynamic-embed-engine"
-  ],
   "scripts": {
     "clean": "node --eval \"import('node:fs').then(({rmSync}) => rmSync('dist', { recursive: true, force: true }))\"",
     "build": "npm run clean && tsc -p tsconfig.build.json",
@@ -41,8 +43,7 @@
     "check": "npm run typecheck && npm run test",
     "package:smoke": "node scripts/package-smoke.mjs",
     "ci": "npm run check && npm run package:smoke",
-    "prepare": "npm run build",
-    "prepack": "npm run typecheck"
+    "prepack": "npm run typecheck && npm run build"
   },
   "devDependencies": {
     "@types/node": "26.1.2",
@@ -50,8 +51,7 @@
     "typescript": "7.0.2"
   },
   "allowScripts": {
-    "@anto-project/dynamic-embed-engine@0.1.0": true,
-    "esbuild@0.28.1": true
+    "esbuild@0.28.2": true
   },
   "license": "UNLICENSED"
 }

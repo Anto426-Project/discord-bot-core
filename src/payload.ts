@@ -3,7 +3,7 @@ import {
   calculateEmbedTextLength,
   validateEmbedPlan,
   type EmbedPlan,
-} from "@anto-project/dynamic-embed-engine";
+} from "../vendor/dynamic-embed-engine/dist/index.js";
 
 import { DiscordCoreError } from "./errors.js";
 import { deterministicDiscordNonce, parseDiscordSnowflake } from "./identifiers.js";
@@ -49,20 +49,31 @@ export interface SafeDiscordMessagePayload {
 
 const uniqueSnowflakes = (values: readonly string[] | undefined, label: string): readonly string[] => {
   if (values === undefined) return Object.freeze([]);
-  if (values.length > 100) {
+  if (!Array.isArray(values) || Object.getPrototypeOf(values) !== Array.prototype || values.length > 100) {
     throw new DiscordCoreError(
       "DISCORD_PAYLOAD_REJECTED",
       `${label} exceeds the Discord mention allowlist limit.`,
       false,
     );
   }
-  return Object.freeze(
-    [...new Set(values.map((value) => parseDiscordSnowflake(value, label)))],
-  );
+  const normalized: string[] = [];
+  for (let index = 0; index < values.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || typeof descriptor.value !== "string") {
+      throw new DiscordCoreError(
+        "DISCORD_PAYLOAD_REJECTED",
+        `${label} must be a dense string array.`,
+        false,
+      );
+    }
+    normalized.push(parseDiscordSnowflake(descriptor.value, label));
+  }
+  return Object.freeze([...new Set(normalized)]);
 };
 
-export const encodeDiscordApiEmbed = (plan: EmbedPlan): DiscordApiEmbed =>
-  Object.freeze({
+export const encodeDiscordApiEmbed = (input: EmbedPlan): DiscordApiEmbed => {
+  const plan = validateEmbedPlan(input);
+  return Object.freeze({
     color: plan.color,
     ...(plan.title === undefined ? {} : { title: plan.title }),
     ...(plan.description === undefined ? {} : { description: plan.description }),
@@ -99,25 +110,34 @@ export const encodeDiscordApiEmbed = (plan: EmbedPlan): DiscordApiEmbed =>
           ),
         }),
   });
+};
 
-export const createSafeDiscordMessage = (
-  input: SafeDiscordMessageInput,
-): SafeDiscordMessagePayload => {
-  const content = input.content;
-  if (content !== undefined && (content.length < 1 || content.length > 2_000)) {
-    throw new DiscordCoreError(
-      "DISCORD_PAYLOAD_REJECTED",
-      "Discord message content must contain between 1 and 2000 characters.",
-      false,
-    );
-  }
-  const embeds = (input.embeds ?? []).map((embed) => validateEmbedPlan(embed));
-  if (embeds.length > 10) {
+export const encodeSafeDiscordEmbeds = (
+  requestedEmbeds: readonly EmbedPlan[] | undefined,
+): readonly DiscordApiEmbed[] => {
+  const source = requestedEmbeds ?? [];
+  if (
+    !Array.isArray(source) ||
+    Object.getPrototypeOf(source) !== Array.prototype ||
+    source.length > 10
+  ) {
     throw new DiscordCoreError(
       "DISCORD_PAYLOAD_REJECTED",
       "Discord message embed limit exceeded.",
       false,
     );
+  }
+  const embeds: EmbedPlan[] = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, String(index));
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new DiscordCoreError(
+        "DISCORD_PAYLOAD_REJECTED",
+        "Discord message embeds must be a dense data array.",
+        false,
+      );
+    }
+    embeds.push(validateEmbedPlan(descriptor.value));
   }
   const aggregateEmbedText = embeds.reduce(
     (total, embed) => total + calculateEmbedTextLength(embed),
@@ -130,6 +150,25 @@ export const createSafeDiscordMessage = (
       false,
     );
   }
+  return Object.freeze(embeds.map((embed) => encodeDiscordApiEmbed(embed)));
+};
+
+export const createSafeDiscordMessage = (
+  input: SafeDiscordMessageInput,
+  destinationId: string,
+): SafeDiscordMessagePayload => {
+  const content = input.content;
+  if (
+    content !== undefined &&
+    (typeof content !== "string" || content.length < 1 || content.length > 2_000)
+  ) {
+    throw new DiscordCoreError(
+      "DISCORD_PAYLOAD_REJECTED",
+      "Discord message content must contain between 1 and 2000 characters.",
+      false,
+    );
+  }
+  const embeds = encodeSafeDiscordEmbeds(input.embeds);
   if (content === undefined && embeds.length === 0) {
     throw new DiscordCoreError(
       "DISCORD_PAYLOAD_REJECTED",
@@ -144,8 +183,8 @@ export const createSafeDiscordMessage = (
     ...(content === undefined ? {} : { content }),
     ...(embeds.length === 0
       ? {}
-      : { embeds: Object.freeze(embeds.map((embed) => encodeDiscordApiEmbed(embed))) }),
-    nonce: deterministicDiscordNonce(input.deliveryId),
+      : { embeds }),
+    nonce: deterministicDiscordNonce(input.deliveryId, destinationId),
     enforce_nonce: true,
     allowed_mentions: Object.freeze({
       parse: Object.freeze([]) as readonly [],

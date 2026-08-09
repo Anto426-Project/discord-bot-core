@@ -3,6 +3,8 @@
 Shared technical foundation for Discord-facing Anto-Project processes. The
 package gives Antobot and University Platform's UniBot the same hardened
 communication primitives without making either product depend on the other.
+`discord.js` is an internal implementation detail of the Node adapter: product
+code consumes only the ports and immutable DTOs exported by this package.
 
 ## Owned technical boundary
 
@@ -10,9 +12,9 @@ communication primitives without making either product depend on the other.
 - safe message payloads with closed mention policy and deterministic nonce;
 - provider-neutral embed plans and dynamic colors through the separately
   pinned `@anto-project/dynamic-embed-engine` submodule;
-- bounded REST requests, responses, retry and rate-limit handling;
+- provider-managed REST buckets and global rate-limit coordination;
 - safe provider receipts and redacted errors;
-- application-command projection and idempotent reconciliation;
+- application-command projection and ownership-safe reconciliation;
 - explicit interaction and event routers;
 - bounded runtime availability/degradation tracking.
 
@@ -24,9 +26,10 @@ owning process. It does not read environment variables, secrets or files.
 
 This repository contains no Antobot or University business code. In
 particular it does not own identity attestation, authorization, capability
-manifests, moderation, music, voice rooms, global broadcasts, updates, beta
-review, templates, localization, persistence, diagnostics or service-to-
-service routing.
+manifests, global broadcasts, updates, beta review, templates, localization,
+persistence, diagnostics or service-to-service routing. Low-level provider
+operations may live here behind stable ports; the owning product still decides
+who may invoke them, for which destination, and with which business policy.
 
 Antobot composes its general Discord modules above this core. UniBot composes
 only University-specific commands and notices above the same core, with its
@@ -39,23 +42,30 @@ runtime communication between the two products.
 - Message mentions are disabled unless an exact user or role allowlist is
   supplied.
 - Every message carries a deterministic nonce and `enforce_nonce=true`.
-- Request time, response bytes, retry attempts and retry delays are bounded.
+- SDK request time and retry attempts are bounded; provider Retry-After values
+  are never shortened into an early retry.
 - Bot tokens and provider bodies are never included in public errors.
 - Routers require explicit bindings; there is no dynamic discovery or
   catch-all handler.
+- Public declaration files contain no `discord.js` or `@discordjs/*` types.
 
 ## Submodule consumption
 
-Consumers pin this repository as `vendor/discord-bot-core` recursively and install it with
-`"@anto-project/discord-bot-core": "file:vendor/discord-bot-core"`. A clean
-checkout bootstraps the submodule before installing/using the consumer:
+Consumers pin this repository as `vendor/discord-bot-core` recursively, list
+that path in the owning repository's npm `workspaces`, and depend on
+`"@anto-project/discord-bot-core": "workspace:*"`. The workspace is important:
+it lets npm install the core's private provider dependencies without declaring
+them directly in Antobot or UniBot. Generated package entrypoints are tracked,
+so a clean recursive checkout is consumable without running lifecycle scripts
+inside the dependency:
 
 ```bash
 git submodule update --init --recursive
-npm --prefix vendor/discord-bot-core/vendor/dynamic-embed-engine ci
-npm --prefix vendor/discord-bot-core ci
 npm ci
 ```
+
+Run `npm --prefix vendor/discord-bot-core ci` only when developing or testing
+the core itself.
 
 ## Commands
 

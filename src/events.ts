@@ -2,9 +2,27 @@ import { DiscordCoreError } from "./errors.js";
 import { parseStableBotKey } from "./identifiers.js";
 
 export interface DiscordEventIdempotencyPort {
-  claim(key: string, ttlMs: number): Promise<boolean>;
-  complete(key: string): Promise<void>;
-  fail(key: string, code: string): Promise<void>;
+  /**
+   * Atomically acquires a pending lease. Implementations must honor the signal;
+   * terminal completed/uncertain tombstones never expire automatically.
+   */
+  claim(
+    key: string,
+    ttlMs: number,
+    signal: AbortSignal,
+  ): Promise<
+    | Readonly<{ status: "claimed"; claimToken: string }>
+    | Readonly<{ status: "duplicate" }>
+  >;
+  /** Atomic compare-and-set for exactly the acquired generation (ABA-safe). */
+  finalize(
+    key: string,
+    claimToken: string,
+    outcome:
+      | Readonly<{ status: "completed" }>
+      | Readonly<{ status: "uncertain"; code: string }>,
+    signal: AbortSignal,
+  ): Promise<"applied" | "already_finalized">;
 }
 
 export type DiscordEventHandlingContext = Readonly<{
@@ -127,8 +145,7 @@ const reportSafely = async (
     await Promise.race([
       reporter.report(failure),
       new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 1_000);
-        timer.unref?.();
+        setTimeout(resolve, 1_000);
       }),
     ]);
   } catch {
@@ -137,25 +154,31 @@ const reportSafely = async (
 };
 
 const executeBounded = async (
-  operation: Promise<void>,
+  operation: () => Promise<void>,
   signal: AbortSignal,
 ): Promise<void> => {
-  await Promise.race([
-    operation,
-    new Promise<never>((_resolve, reject) => {
-      if (signal.aborted) {
-        reject(signal.reason);
-        return;
-      }
-      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-    }),
-  ]);
+  if (signal.aborted) throw signal.reason;
+  let rejectDeadline: ((reason: unknown) => void) | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject;
+  });
+  const onAbort = (): void => rejectDeadline?.(signal.reason);
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (signal.aborted) throw signal.reason;
+    await Promise.race([operation(), deadline]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 };
 
-const persistenceBounded = async <T>(operation: Promise<T>, timeoutMs: number): Promise<T> => {
+const persistenceBounded = async <T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T> => {
   const signal = AbortSignal.timeout(timeoutMs);
   return Promise.race([
-    operation,
+    operation(signal),
     new Promise<never>((_resolve, reject) => {
       signal.addEventListener(
         "abort",
@@ -208,8 +231,13 @@ export class DiscordEventRouter {
       [...byName].map(([name, entries]) => [name, Object.freeze([...entries])]),
     );
     this.handlerTimeoutMs();
-    this.idempotencyTtlMs();
-    this.persistenceTimeoutMs();
+    const ttlMs = this.idempotencyTtlMs();
+    const minimumTtlMs = this.handlerTimeoutMs() + this.persistenceTimeoutMs() * 2 + 1_000;
+    if (ttlMs < minimumTtlMs) {
+      throw new RangeError(
+        "Discord event idempotency TTL must exceed the handler and persistence deadline window.",
+      );
+    }
   }
 
   private handlerTimeoutMs(): number {
@@ -254,35 +282,53 @@ export class DiscordEventRouter {
         () => controller.abort(new DiscordCoreError("DISCORD_TIMEOUT", "Discord event handler timed out.", true)),
         this.handlerTimeoutMs(),
       );
-      timer.unref?.();
       let key: string | null = null;
-      let claimed = false;
+      let claimToken: string | null = null;
       try {
         const prepared = subscription.prepare(arguments_);
         key = prepared.idempotencyKey;
-        claimed = await persistenceBounded(
-          this.idempotency.claim(key, this.idempotencyTtlMs()),
+        const claim = await persistenceBounded(
+          (signal) => this.idempotency.claim(key as string, this.idempotencyTtlMs(), signal),
           this.persistenceTimeoutMs(),
         );
-        if (!claimed) {
+        if (claim.status === "duplicate") {
           outcomes.push({ status: "duplicate", subscriptionId: subscription.subscriptionId, idempotencyKey: key });
           continue;
         }
-        await executeBounded(prepared.execute(controller.signal), controller.signal);
-        await persistenceBounded(
-          this.idempotency.complete(key),
+        claimToken = parseStableBotKey(claim.claimToken, "Discord event claim token");
+        await executeBounded(() => prepared.execute(controller.signal), controller.signal);
+        const finalized = await persistenceBounded(
+          (signal) =>
+            this.idempotency.finalize(
+              key as string,
+              claimToken as string,
+              Object.freeze({ status: "completed" }),
+              signal,
+            ),
           this.persistenceTimeoutMs(),
         );
+        if (finalized !== "applied") {
+          throw new DiscordCoreError(
+            "DISCORD_RESPONSE_INVALID",
+            "Discord event idempotency state was already finalized.",
+            false,
+          );
+        }
         outcomes.push({ status: "handled", subscriptionId: subscription.subscriptionId, idempotencyKey: key });
       } catch (error: unknown) {
         const code = errorCode(error);
-        // Once claimed, never release automatically: a timed-out/non-cooperative
-        // handler or failed completion write has an uncertain side-effect state.
-        // The durable store retains the claim and records failure for an explicit
-        // recovery worker, preventing concurrent duplicate execution.
-        if (key !== null && claimed) {
+        // Once claimed, failure is terminally marked uncertain through a CAS.
+        // This prevents a timed-out/non-cooperative handler from racing a replay,
+        // and prevents a late success write from overwriting the failure state.
+        if (key !== null && claimToken !== null) {
           await persistenceBounded(
-            this.idempotency.fail(key, code),
+            (signal) =>
+              this.idempotency.finalize(
+                key as string,
+                claimToken as string,
+                Object.freeze({ status: "uncertain", code }),
+                signal,
+              ),
             this.persistenceTimeoutMs(),
           ).catch(() => undefined);
         }

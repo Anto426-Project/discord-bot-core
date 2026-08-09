@@ -154,10 +154,20 @@ const PERMISSION_BITS: Readonly<Record<CommandPermission, bigint>> = Object.free
   view_audit_log: 1n << 7n,
 });
 
-const COMMAND_NAME_PATTERN = /^[\p{Ll}\p{Lm}\p{Lo}\p{N}_-]{1,32}$/u;
+const COMMAND_NAME_PATTERN = /^[-_'\p{L}\p{N}\p{sc=Devanagari}\p{sc=Thai}]{1,32}$/u;
 
 const invalid = (summary: string): never => {
   throw new DiscordCoreError("DISCORD_INVALID_INPUT", summary, false);
+};
+
+export const assertDiscordApplicationCommandName = (
+  value: string,
+  label = "Discord command name",
+): string => {
+  if (!COMMAND_NAME_PATTERN.test(value) || value !== value.toLocaleLowerCase()) {
+    invalid(`${label} is invalid.`);
+  }
+  return value;
 };
 
 const localizedBase = (
@@ -166,7 +176,7 @@ const localizedBase = (
   label: string,
 ): Readonly<Record<string, unknown>> => {
   for (const [locale, text] of Object.entries(name)) {
-    if (!COMMAND_NAME_PATTERN.test(text)) invalid(`${label} has an invalid ${locale} name.`);
+    assertDiscordApplicationCommandName(text, `${label} ${locale} name`);
   }
   for (const [locale, text] of Object.entries(description)) {
     if (text.length < 1 || text.length > 100) {
@@ -190,12 +200,16 @@ const mapCompletion = <TValue extends string | number>(
   if (completion.values.length < 1 || completion.values.length > 25) {
     invalid("Discord command choices must contain between 1 and 25 entries.");
   }
+  const seenNames = new Set<string>();
+  const seenValues = new Set<string>();
   return Object.freeze({
     autocomplete: false,
     choices: Object.freeze(
       completion.values.map((choice) => {
-        for (const value of Object.values(choice.name)) {
+        for (const value of new Set(Object.values(choice.name))) {
           if (value.length < 1 || value.length > 100) invalid("Discord choice name is invalid.");
+          if (seenNames.has(value)) invalid("Discord choice names must be unique across localizations.");
+          seenNames.add(value);
         }
         if (
           (valueKind === "string" && typeof choice.value !== "string") ||
@@ -215,6 +229,9 @@ const mapCompletion = <TValue extends string | number>(
         if (valueKind === "integer" && !Number.isSafeInteger(choice.value)) {
           invalid("Discord integer choice value must be a safe integer.");
         }
+        const valueKey = `${typeof choice.value}:${String(choice.value)}`;
+        if (seenValues.has(valueKey)) invalid("Discord choice values must be unique.");
+        seenValues.add(valueKey);
         return Object.freeze({
           name: choice.name.en,
           name_localizations: Object.freeze({ it: choice.name.it, "en-US": choice.name.en }),
@@ -226,7 +243,7 @@ const mapCompletion = <TValue extends string | number>(
 };
 
 const localizedLength = (value: LocalizedCommandText): number =>
-  value.it.length + value.en.length;
+  Math.max(value.it.length, value.en.length);
 
 const completionTextLength = (
   completion: CommandCompletion<string | number> | undefined,
@@ -335,18 +352,15 @@ const assertUniqueSiblingOptions = (
   options: readonly CommandOption[] | readonly BasicCommandOption[] | readonly SubcommandOption[],
   label: string,
 ): void => {
-  const namesByLocale: Record<SupportedCommandLocale, Set<string>> = {
-    it: new Set<string>(),
-    en: new Set<string>(),
-  };
+  const names = new Set<string>();
   let optionalSeen = false;
   for (const option of options) {
-    for (const locale of ["it", "en"] as const) {
-      const name = option.name[locale];
-      if (namesByLocale[locale].has(name)) {
-        invalid(`${label} contains duplicate ${locale} option names.`);
-      }
-      namesByLocale[locale].add(name);
+    const ownNames = new Set(Object.values(option.name));
+    for (const name of ownNames) {
+      if (names.has(name)) invalid(`${label} contains duplicate option names across localizations.`);
+    }
+    for (const name of ownNames) {
+      names.add(name);
     }
     if ("required" in option) {
       if (!option.required) optionalSeen = true;
