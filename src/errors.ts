@@ -38,7 +38,13 @@ export class DiscordCoreError extends Error {
     public readonly retryAfterMs: number | null = null,
     cause?: unknown,
   ) {
-    super(safeSummary(summary), cause === undefined ? undefined : { cause });
+    const sanitizedCause =
+      cause instanceof Error
+        ? new Error(redactDiscordSensitiveText(cause.message).slice(0, SUMMARY_MAX_LENGTH))
+        : typeof cause === "string"
+          ? new Error(redactDiscordSensitiveText(cause).slice(0, SUMMARY_MAX_LENGTH))
+          : undefined;
+    super(safeSummary(summary), sanitizedCause === undefined ? undefined : { cause: sanitizedCause });
     this.name = "DiscordCoreError";
     this.safeSummary = safeSummary(summary);
   }
@@ -60,8 +66,12 @@ export const redactDiscordSensitiveText = (input: string): string =>
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{20,}/giu, "Bearer [redacted]")
     .replace(/\bmfa\.[A-Za-z0-9_-]{20,}/giu, "[redacted-token]")
     .replace(
-      /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9._-]+/giu,
+      /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/(?:webhooks|interactions)\/\d+\/[A-Za-z0-9._-]+/giu,
       "https://discord.com/api/webhooks/[redacted]",
+    )
+    .replace(
+      /"(?:token|secret|authorization|api[_-]?key)"\s*:\s*"[^"]*"/giu,
+      (match) => `${match.slice(0, match.indexOf(":") + 1)}"[redacted]"`,
     )
     .replace(
       /\b(?:token|secret|authorization|api[_-]?key)\s*[:=]\s*[^\s,;&]+/giu,

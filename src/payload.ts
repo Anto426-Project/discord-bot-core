@@ -1,4 +1,9 @@
-import type { EmbedPlan } from "@anto-project/dynamic-embed-engine";
+import {
+  EMBED_LIMITS,
+  calculateEmbedTextLength,
+  validateEmbedPlan,
+  type EmbedPlan,
+} from "@anto-project/dynamic-embed-engine";
 
 import { DiscordCoreError } from "./errors.js";
 import { deterministicDiscordNonce, parseDiscordSnowflake } from "./identifiers.js";
@@ -106,11 +111,22 @@ export const createSafeDiscordMessage = (
       false,
     );
   }
-  const embeds = input.embeds ?? [];
+  const embeds = (input.embeds ?? []).map((embed) => validateEmbedPlan(embed));
   if (embeds.length > 10) {
     throw new DiscordCoreError(
       "DISCORD_PAYLOAD_REJECTED",
       "Discord message embed limit exceeded.",
+      false,
+    );
+  }
+  const aggregateEmbedText = embeds.reduce(
+    (total, embed) => total + calculateEmbedTextLength(embed),
+    0,
+  );
+  if (aggregateEmbedText > EMBED_LIMITS.totalText) {
+    throw new DiscordCoreError(
+      "DISCORD_PAYLOAD_REJECTED",
+      "Discord message aggregate embed text limit exceeded.",
       false,
     );
   }

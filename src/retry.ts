@@ -49,7 +49,11 @@ export const nodeDiscordSleeper: DiscordSleeper = async (delayMs, signal) => {
       reject(signal.reason);
       return;
     }
-    const timer = setTimeout(resolve, delayMs);
+    const done = (): void => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timer = setTimeout(done, delayMs);
     const abort = (): void => {
       clearTimeout(timer);
       reject(signal.reason);
@@ -84,6 +88,19 @@ export const executeWithDiscordRetry = async <T>(input: {
         policy.baseDelayMs * 2 ** (attempt - 1),
       );
       const requested = decision.retryAfterMs;
+      if (
+        requested !== undefined &&
+        (!Number.isFinite(requested) || requested < 0 || requested > 60_000)
+      ) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord retry delay is invalid.",
+          false,
+          null,
+          null,
+          error,
+        );
+      }
       const delay =
         requested === undefined
           ? exponential
