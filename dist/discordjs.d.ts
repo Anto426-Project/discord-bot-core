@@ -2,7 +2,7 @@ import type { DiscordApplicationCommandBody } from "./command-model.js";
 import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublicationScope, type DiscordRemoteApplicationCommand } from "./command-publisher.js";
 import type { DiscordChannelMessageDelivery, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordMessageDeliveryPort } from "./delivery.js";
 import type { DiscordGatewayIdentity, DiscordGatewayLifecycleListener, DiscordGatewayRuntimePort } from "./gateway.js";
-import type { DiscordInteractionListener } from "./interactions.js";
+import type { DiscordInteraction, DiscordInteractionListener } from "./interactions.js";
 export type DiscordPrivilegedGatewayIntent = "GuildMembers" | "GuildPresences" | "MessageContent";
 export declare const DISCORD_GATEWAY_INTENTS: readonly ["Guilds", "GuildMembers", "GuildModeration", "GuildExpressions", "GuildIntegrations", "GuildWebhooks", "GuildInvites", "GuildVoiceStates", "GuildPresences", "GuildMessages", "GuildMessageReactions", "GuildMessageTyping", "DirectMessages", "DirectMessageReactions", "DirectMessageTyping", "MessageContent", "GuildScheduledEvents", "AutoModerationConfiguration", "AutoModerationExecution", "GuildMessagePolls", "DirectMessagePolls"];
 export type DiscordGatewayIntent = (typeof DISCORD_GATEWAY_INTENTS)[number];
@@ -17,6 +17,15 @@ export interface NodeDiscordGatewayOptions {
     readonly startupTimeoutMs?: number;
     readonly listenerTimeoutMs?: number;
 }
+/**
+ * Converts a provider-owned Node interaction into the stable core DTO.
+ *
+ * The unknown input is intentional: consumers may forward an object received by
+ * their provider adapter without importing or exposing any provider SDK type. A
+ * structural lookalike is rejected because accepting one would let untrusted
+ * objects execute arbitrary getters and methods inside the provider boundary.
+ */
+export declare const normalizeNodeDiscordInteraction: (value: unknown) => DiscordInteraction | null;
 export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort {
     #private;
     constructor(options: NodeDiscordGatewayOptions);

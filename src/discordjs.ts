@@ -1,4 +1,5 @@
 import {
+  BaseInteraction,
   Client,
   DiscordAPIError,
   Events,
@@ -668,6 +669,23 @@ const normalizeInteraction = (interaction: Interaction): DiscordInteraction | nu
     });
   }
   return null;
+};
+
+/**
+ * Converts a provider-owned Node interaction into the stable core DTO.
+ *
+ * The unknown input is intentional: consumers may forward an object received by
+ * their provider adapter without importing or exposing any provider SDK type. A
+ * structural lookalike is rejected because accepting one would let untrusted
+ * objects execute arbitrary getters and methods inside the provider boundary.
+ */
+export const normalizeNodeDiscordInteraction = (value: unknown): DiscordInteraction | null => {
+  try {
+    if (!(value instanceof BaseInteraction)) return null;
+    return normalizeInteraction(value as Interaction);
+  } catch (error: unknown) {
+    throw providerFailure(error);
+  }
 };
 
 export class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort {

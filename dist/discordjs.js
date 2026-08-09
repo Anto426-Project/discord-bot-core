@@ -1,4 +1,4 @@
-import { Client, DiscordAPIError, Events, GatewayIntentBits, HTTPError, MessageFlags, Partials, REST, RateLimitError, Routes, } from "discord.js";
+import { BaseInteraction, Client, DiscordAPIError, Events, GatewayIntentBits, HTTPError, MessageFlags, Partials, REST, RateLimitError, Routes, } from "discord.js";
 import { fingerprintDiscordChatInputCommand, } from "./command-publisher.js";
 import { discordButton, discordMessageActionRow, discordModal, discordStringSelect, discordTextInput, discordUserSelect, } from "./components.js";
 import { DiscordCoreError } from "./errors.js";
@@ -418,6 +418,24 @@ const normalizeInteraction = (interaction) => {
         });
     }
     return null;
+};
+/**
+ * Converts a provider-owned Node interaction into the stable core DTO.
+ *
+ * The unknown input is intentional: consumers may forward an object received by
+ * their provider adapter without importing or exposing any provider SDK type. A
+ * structural lookalike is rejected because accepting one would let untrusted
+ * objects execute arbitrary getters and methods inside the provider boundary.
+ */
+export const normalizeNodeDiscordInteraction = (value) => {
+    try {
+        if (!(value instanceof BaseInteraction))
+            return null;
+        return normalizeInteraction(value);
+    }
+    catch (error) {
+        throw providerFailure(error);
+    }
 };
 export class NodeDiscordGatewayAdapter {
     #client;

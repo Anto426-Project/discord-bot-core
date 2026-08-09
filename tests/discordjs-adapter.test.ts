@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { Client, Events } from "discord.js";
+import { ChatInputCommandInteraction, Client, Events } from "discord.js";
 
 import { DiscordCoreError } from "../src/errors.js";
-import { NodeDiscordGatewayAdapter } from "../src/discordjs.js";
+import {
+  NodeDiscordGatewayAdapter,
+  normalizeNodeDiscordInteraction,
+} from "../src/discordjs.js";
 import type { DiscordInteraction } from "../src/interactions.js";
 
 const TEST_TOKEN = "provider-token-value-that-must-not-cross-the-core-boundary";
@@ -20,7 +23,87 @@ type MutableTestClient = Client & {
 const nextTurn = (): Promise<void> =>
   new Promise((resolve) => setImmediate(resolve));
 
+const createProviderChatInputInteraction = (): unknown => {
+  const client = new Client({ intents: [] });
+  (client as unknown as { user: unknown }).user = {
+    id: BOT_USER_ID,
+    username: "test-bot",
+    globalName: null,
+    displayAvatarURL: () => "https://cdn.discordapp.com/embed/avatars/0.png",
+  };
+  return Reflect.construct(ChatInputCommandInteraction, [
+    client,
+    {
+      type: 2,
+      id: INTERACTION_ID,
+      token: TEST_TOKEN,
+      application_id: APPLICATION_ID,
+      channel: null,
+      guild_id: null,
+      user: {
+        id: USER_ID,
+        username: "student",
+        global_name: null,
+        discriminator: "0",
+        avatar: null,
+      },
+      version: 1,
+      app_permissions: "0",
+      locale: "it",
+      guild_locale: null,
+      entitlements: [],
+      authorizing_integration_owners: {},
+      context: null,
+      attachment_size_limit: 10_000_000,
+      data: {
+        id: "52345678901234567",
+        name: "ping",
+        type: 1,
+        options: [],
+      },
+    },
+  ]);
+};
+
 describe("Node Discord adapter isolation", () => {
+  it("normalizes only genuine provider interaction instances", () => {
+    const structuralImpostor = {
+      id: INTERACTION_ID,
+      isRepliable: () => true,
+      isChatInputCommand: () => true,
+      commandName: "unsafe",
+    };
+    assert.equal(normalizeNodeDiscordInteraction(structuralImpostor), null);
+
+    const normalized = normalizeNodeDiscordInteraction(createProviderChatInputInteraction());
+    assert.ok(normalized);
+    assert.equal(normalized.kind, "chat_input");
+    assert.equal(normalized.commandName, "ping");
+    assert.equal(normalized.user.id, USER_ID);
+    assert.equal(normalized.bot.id, BOT_USER_ID);
+  });
+
+  it("redacts provider failures while normalizing genuine instances", () => {
+    const interaction = createProviderChatInputInteraction() as {
+      isRepliable(): boolean;
+    };
+    const providerSecret = "PROVIDER_INTERACTION_SECRET";
+    interaction.isRepliable = () => {
+      throw new Error(`provider interaction failed with ${providerSecret}`);
+    };
+
+    assert.throws(
+      () => normalizeNodeDiscordInteraction(interaction),
+      (error: unknown) => {
+        assert.ok(error instanceof DiscordCoreError);
+        assert.equal(error.code, "DISCORD_NETWORK_FAILURE");
+        assert.doesNotMatch(JSON.stringify(error), new RegExp(providerSecret, "u"));
+        assert.equal("cause" in error, false);
+        return true;
+      },
+    );
+  });
+
   it("shares gateway startup, isolates caller cancellation and awaits provider shutdown", async () => {
     const loginDescriptor = Object.getOwnPropertyDescriptor(Client.prototype, "login");
     const destroyDescriptor = Object.getOwnPropertyDescriptor(Client.prototype, "destroy");
