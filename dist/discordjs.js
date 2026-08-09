@@ -72,6 +72,7 @@ const boundedInteger = (value, fallback, minimum, maximum, label) => {
     }
     return resolved;
 };
+const isAbortRequested = (signal) => signal?.aborted === true;
 /**
  * Creates the private provider client with closed mention defaults. Privileged gateway
  * intents must be acknowledged individually by the owning product; the core
@@ -271,34 +272,48 @@ class NodeDiscordInteractionResponder {
         return this.#interaction.deferred;
     }
     async reply(plan) {
-        await this.#interaction.reply(encodeInteractionMessage(plan, true));
+        await this.#perform(() => this.#interaction.reply(encodeInteractionMessage(plan, true)));
     }
     async deferReply(visibility = "public") {
-        await this.#interaction.deferReply(visibility === "ephemeral" ? { flags: MessageFlags.Ephemeral } : {});
+        await this.#perform(() => this.#interaction.deferReply(visibility === "ephemeral" ? { flags: MessageFlags.Ephemeral } : {}));
     }
     async editReply(plan) {
-        await this.#interaction.editReply(encodeInteractionMessage(plan, false));
+        await this.#perform(() => this.#interaction.editReply(encodeInteractionMessage(plan, false)));
     }
     async followUp(plan) {
-        await this.#interaction.followUp(encodeInteractionMessage(plan, true));
+        await this.#perform(() => this.#interaction.followUp(encodeInteractionMessage(plan, true)));
     }
     async deferUpdate() {
-        if (!this.#interaction.isMessageComponent() && !this.#interaction.isModalSubmit()) {
+        const interaction = this.#interaction;
+        if (!interaction.isMessageComponent() && !interaction.isModalSubmit()) {
             throw new DiscordCoreError("DISCORD_INVALID_INPUT", "This Discord interaction cannot defer a component update.", false);
         }
-        await this.#interaction.deferUpdate();
+        await this.#perform(() => interaction.deferUpdate());
     }
     async update(plan) {
-        if (!this.#interaction.isMessageComponent()) {
+        const interaction = this.#interaction;
+        if (!interaction.isMessageComponent()) {
             throw new DiscordCoreError("DISCORD_INVALID_INPUT", "This Discord interaction cannot update its source message.", false);
         }
-        await this.#interaction.update(encodeInteractionMessage(plan, false));
+        await this.#perform(() => interaction.update(encodeInteractionMessage(plan, false)));
     }
     async showModal(modal) {
-        if (!this.#interaction.isCommand() && !this.#interaction.isMessageComponent()) {
+        const interaction = this.#interaction;
+        if (!interaction.isCommand() && !interaction.isMessageComponent()) {
             throw new DiscordCoreError("DISCORD_INVALID_INPUT", "This Discord interaction cannot open a modal.", false);
         }
-        await this.#interaction.showModal(encodeModal(modal));
+        await this.#perform(() => interaction.showModal(encodeModal(modal)));
+    }
+    async #perform(operation) {
+        try {
+            await operation();
+        }
+        catch (error) {
+            // DiscordAPIError includes the provider URL and request body. Interaction
+            // URLs contain a bearer-equivalent interaction token, so the raw SDK
+            // error must never cross the adapter boundary.
+            throw providerFailure(error);
+        }
     }
 }
 const interactionUser = (interaction) => Object.freeze({
@@ -406,45 +421,155 @@ const normalizeInteraction = (interaction) => {
 };
 export class NodeDiscordGatewayAdapter {
     #client;
+    #clientFactory;
     #botToken;
     #listeners = new Set();
     #interactionListeners = new Set();
     #startupTimeoutMs;
+    #shutdownTimeoutMs;
     #listenerTimeoutMs;
+    #startPromise = null;
+    #providerLoginPromise = null;
+    #startupController = null;
+    #stopPromise = null;
+    #stopRequested = false;
     constructor(options) {
-        this.#client = createClient(options);
         this.#botToken = validatedToken(options.botToken);
-        this.#startupTimeoutMs = boundedInteger(options.startupTimeoutMs, 30_000, 1_000, 120_000, "startupTimeoutMs");
-        this.#listenerTimeoutMs = boundedInteger(options.listenerTimeoutMs, 5_000, 100, 30_000, "listenerTimeoutMs");
-        this.#client.on(Events.ClientReady, (client) => {
-            void this.#emit({ type: "ready", identity: this.#identity(client) });
+        const clientOptions = Object.freeze({
+            intents: Object.freeze([...options.intents]),
+            ...(options.acknowledgedPrivilegedIntents === undefined
+                ? {}
+                : {
+                    acknowledgedPrivilegedIntents: Object.freeze([
+                        ...options.acknowledgedPrivilegedIntents,
+                    ]),
+                }),
+            ...(options.partials === undefined
+                ? {}
+                : { partials: Object.freeze([...options.partials]) }),
+            ...(options.closeTimeoutMs === undefined
+                ? {}
+                : { closeTimeoutMs: options.closeTimeoutMs }),
+            ...(options.waitGuildTimeoutMs === undefined
+                ? {}
+                : { waitGuildTimeoutMs: options.waitGuildTimeoutMs }),
         });
-        this.#client.on(Events.ShardResume, (shardId) => {
+        this.#clientFactory = () => createClient(clientOptions);
+        this.#client = this.#clientFactory();
+        this.#startupTimeoutMs = boundedInteger(options.startupTimeoutMs, 30_000, 1_000, 120_000, "startupTimeoutMs");
+        this.#shutdownTimeoutMs = boundedInteger(options.closeTimeoutMs, 5_000, 1_000, 30_000, "closeTimeoutMs");
+        this.#listenerTimeoutMs = boundedInteger(options.listenerTimeoutMs, 5_000, 100, 30_000, "listenerTimeoutMs");
+        this.#attachClient(this.#client);
+    }
+    #attachClient(client) {
+        client.on(Events.ClientReady, (readyClient) => {
+            if (this.#client !== client || this.#stopRequested)
+                return;
+            void this.#emit({ type: "ready", identity: this.#identity(readyClient) });
+        });
+        client.on(Events.ShardResume, (shardId) => {
+            if (this.#client !== client || this.#stopRequested)
+                return;
             void this.#emit({ type: "shard_resumed", shardId });
         });
-        this.#client.on(Events.ShardDisconnect, (closeEvent, shardId) => {
+        client.on(Events.ShardDisconnect, (closeEvent, shardId) => {
+            if (this.#client !== client || this.#stopRequested)
+                return;
             void this.#emit({
                 type: "shard_disconnected",
                 shardId,
                 closeCode: Number.isInteger(closeEvent.code) ? closeEvent.code : null,
             });
         });
-        this.#client.on(Events.ShardReconnecting, (shardId) => {
+        client.on(Events.ShardReconnecting, (shardId) => {
+            if (this.#client !== client || this.#stopRequested)
+                return;
             void this.#emit({ type: "shard_reconnecting", shardId });
         });
-        this.#client.on(Events.Error, () => {
+        client.on(Events.Error, () => {
+            if (this.#client !== client || this.#stopRequested)
+                return;
             void this.#emit({ type: "provider_error", code: "DISCORD_GATEWAY_ERROR" });
         });
-        this.#client.on(Events.InteractionCreate, (interaction) => {
+        client.on(Events.InteractionCreate, (interaction) => {
+            if (this.#client !== client || this.#stopRequested)
+                return;
             const normalized = normalizeInteraction(interaction);
             if (normalized !== null)
                 void this.#emitInteraction(normalized);
         });
     }
+    #replaceStoppedClient() {
+        const client = this.#clientFactory();
+        this.#client = client;
+        this.#attachClient(client);
+    }
+    /*
+     * Provider clients are generation-scoped: discord.js Client.destroy()
+     * permanently tears down that instance. Restart therefore creates a fresh
+     * internal client while preserving the stable product-facing port.
+     */
+    #prepareClientForStart() {
+        if (!this.#stopRequested)
+            return;
+        this.#replaceStoppedClient();
+        this.#stopRequested = false;
+    }
     async start(signal) {
-        if (signal?.aborted === true) {
+        if (isAbortRequested(signal)) {
             throw new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway startup was cancelled.", false);
         }
+        if (this.#stopPromise !== null)
+            await this.#stopPromise;
+        if (isAbortRequested(signal)) {
+            throw new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway startup was cancelled.", false);
+        }
+        if (this.#client.isReady() && !this.#stopRequested)
+            return this.#identity(this.#client);
+        let shared = this.#startPromise;
+        if (shared === null) {
+            if (this.#providerLoginPromise !== null) {
+                throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "A previous Discord gateway login has not settled.", true);
+            }
+            this.#prepareClientForStart();
+            const controller = new AbortController();
+            const pending = this.#startOnce(controller.signal);
+            shared = pending;
+            this.#startupController = controller;
+            this.#startPromise = pending;
+            void pending.then(() => this.#clearStartup(pending, controller), () => this.#clearStartup(pending, controller));
+        }
+        return this.#awaitStartupForCaller(shared, signal);
+    }
+    async stop() {
+        if (this.#stopPromise !== null)
+            return this.#stopPromise;
+        const startup = this.#startPromise;
+        const providerLogin = this.#providerLoginPromise;
+        this.#stopRequested = true;
+        this.#startupController?.abort();
+        const stopping = (async () => {
+            if (startup !== null) {
+                try {
+                    await startup;
+                }
+                catch {
+                    // Startup failure is reported to its caller. Shutdown still owns the
+                    // final provider cleanup and must not expose the raw SDK error.
+                }
+            }
+            await this.#shutdownProviderLogin(providerLogin);
+        })();
+        this.#stopPromise = stopping;
+        try {
+            await stopping;
+        }
+        finally {
+            if (this.#stopPromise === stopping)
+                this.#stopPromise = null;
+        }
+    }
+    async #startOnce(signal) {
         if (this.#client.isReady())
             return this.#identity(this.#client);
         let ready;
@@ -463,11 +588,12 @@ export class NodeDiscordGatewayAdapter {
             rejectCancellation = reject;
         });
         const onAbort = () => rejectCancellation(new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway startup was cancelled.", false));
-        signal?.addEventListener("abort", onAbort, { once: true });
+        signal.addEventListener("abort", onAbort, { once: true });
+        const providerLogin = this.#beginProviderLogin();
         try {
             await Promise.race([
                 (async () => {
-                    await this.#client.login(this.#botToken);
+                    await providerLogin;
                     if (!this.#client.isReady())
                         await readyPromise;
                 })(),
@@ -477,19 +603,110 @@ export class NodeDiscordGatewayAdapter {
             return this.#identity(this.#client);
         }
         catch (error) {
-            this.#client.destroy();
+            this.#stopRequested = true;
+            if (!signal.aborted) {
+                await this.#shutdownProviderLogin(providerLogin);
+            }
             if (error instanceof DiscordCoreError)
                 throw error;
             throw providerFailureForSignal(error, signal);
         }
         finally {
             clearTimeout(timeout);
-            signal?.removeEventListener("abort", onAbort);
+            signal.removeEventListener("abort", onAbort);
             this.#client.off(Events.ClientReady, onReady);
         }
     }
-    async stop() {
-        this.#client.destroy();
+    async #awaitStartupForCaller(startup, signal) {
+        if (signal === undefined)
+            return startup;
+        if (signal.aborted) {
+            throw new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway startup was cancelled.", false);
+        }
+        let rejectCancellation;
+        const cancellation = new Promise((_resolve, reject) => {
+            rejectCancellation = reject;
+        });
+        const onAbort = () => rejectCancellation(new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway startup was cancelled.", false));
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+            return await Promise.race([startup, cancellation]);
+        }
+        finally {
+            signal.removeEventListener("abort", onAbort);
+        }
+    }
+    #clearStartup(startup, controller) {
+        if (this.#startPromise === startup)
+            this.#startPromise = null;
+        if (this.#startupController === controller)
+            this.#startupController = null;
+    }
+    #beginProviderLogin() {
+        if (this.#providerLoginPromise !== null) {
+            throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "A Discord gateway login is already active.", true);
+        }
+        let login;
+        try {
+            login = this.#client.login(this.#botToken);
+        }
+        catch (error) {
+            login = Promise.reject(error);
+        }
+        const providerLogin = login.then(() => undefined);
+        this.#providerLoginPromise = providerLogin;
+        void providerLogin.then(() => this.#clearProviderLogin(providerLogin), () => this.#clearProviderLogin(providerLogin));
+        return providerLogin;
+    }
+    #clearProviderLogin(providerLogin) {
+        if (this.#providerLoginPromise === providerLogin)
+            this.#providerLoginPromise = null;
+    }
+    async #shutdownProviderLogin(providerLogin) {
+        let failure = null;
+        const recordFailure = (error) => {
+            failure ??= error instanceof DiscordCoreError ? error : providerFailure(error);
+        };
+        try {
+            await this.#client.destroy();
+        }
+        catch (error) {
+            recordFailure(error);
+        }
+        if (providerLogin !== null) {
+            try {
+                await this.#awaitProviderLoginSettlement(providerLogin);
+            }
+            catch (error) {
+                recordFailure(error);
+            }
+            try {
+                // A provider login may settle and emit Ready after the first destroy.
+                // A final awaited destroy closes that late session before stop returns.
+                await this.#client.destroy();
+            }
+            catch (error) {
+                recordFailure(error);
+            }
+        }
+        if (failure !== null)
+            throw failure;
+    }
+    async #awaitProviderLoginSettlement(providerLogin) {
+        let rejectTimeout;
+        const timeoutPromise = new Promise((_resolve, reject) => {
+            rejectTimeout = reject;
+        });
+        const timeout = setTimeout(() => rejectTimeout(new DiscordCoreError("DISCORD_TIMEOUT", "Discord gateway login did not settle during shutdown.", true)), this.#shutdownTimeoutMs);
+        try {
+            await Promise.race([
+                providerLogin.catch(() => undefined),
+                timeoutPromise,
+            ]);
+        }
+        finally {
+            clearTimeout(timeout);
+        }
     }
     isReady() {
         return this.#client.isReady();
