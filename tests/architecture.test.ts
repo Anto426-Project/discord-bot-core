@@ -43,6 +43,18 @@ describe("discord bot core architecture", () => {
     assert.doesNotMatch(declarations, /DiscordJs/u);
   });
 
+  it("shares one provider-neutral action-row encoder across interactions and REST delivery", async () => {
+    const payloadSource = await readFile(path.resolve("src/payload.ts"), "utf8");
+    const adapterSource = await readFile(path.resolve("src/discordjs.ts"), "utf8");
+    const declarations = await readFile(path.resolve("dist/payload.d.ts"), "utf8");
+
+    assert.match(payloadSource, /export const encodeSafeDiscordActionRows/u);
+    assert.match(adapterSource, /encodeSafeDiscordActionRows\(plan\.components\)/u);
+    assert.doesNotMatch(adapterSource, /const encodeActionRows/u);
+    assert.match(declarations, /interface DiscordMessagePlan/u);
+    assert.match(declarations, /components\?: readonly DiscordMessageActionRow\[\]/u);
+  });
+
   it("contains no product, service authority or ambient secret lookup", async () => {
     const source = (
       await Promise.all((await collect(path.resolve("src"), ".ts")).map((file) => readFile(file, "utf8")))

@@ -1,4 +1,5 @@
 import { type EmbedPlan } from "../vendor/dynamic-embed-engine/dist/index.js";
+import { type DiscordMessageActionRow } from "./components.js";
 export interface DiscordApiEmbed {
     readonly color: number;
     readonly title?: string;
@@ -31,15 +32,26 @@ export interface DiscordAllowedMentionsInput {
     readonly roles?: readonly string[];
     readonly repliedUser?: boolean;
 }
-export interface SafeDiscordMessageInput {
-    readonly deliveryId: string;
+/** Provider-neutral message requested by a bot product. */
+export interface DiscordMessagePlan {
     readonly content?: string;
     readonly embeds?: readonly EmbedPlan[];
+    readonly components?: readonly DiscordMessageActionRow[];
     readonly allowedMentions?: DiscordAllowedMentionsInput;
 }
+/** Delivery-scoped message input used to derive a deterministic provider nonce. */
+export interface SafeDiscordMessageInput extends DiscordMessagePlan {
+    readonly deliveryId: string;
+}
+export type DiscordApiMessageComponent = Readonly<Record<string, unknown>>;
+export type DiscordApiMessageActionRow = Readonly<{
+    type: 1;
+    components: readonly DiscordApiMessageComponent[];
+}>;
 export interface SafeDiscordMessagePayload {
     readonly content?: string;
     readonly embeds?: readonly DiscordApiEmbed[];
+    readonly components?: readonly DiscordApiMessageActionRow[];
     readonly nonce: string;
     readonly enforce_nonce: true;
     readonly allowed_mentions: Readonly<{
@@ -49,6 +61,8 @@ export interface SafeDiscordMessagePayload {
         replied_user: boolean;
     }>;
 }
+/** Revalidates and encodes message action rows without exposing the provider SDK. */
+export declare const encodeSafeDiscordActionRows: (rows: readonly DiscordMessageActionRow[] | undefined) => readonly DiscordApiMessageActionRow[] | undefined;
 export declare const encodeDiscordApiEmbed: (input: EmbedPlan) => DiscordApiEmbed;
 export declare const encodeSafeDiscordEmbeds: (requestedEmbeds: readonly EmbedPlan[] | undefined) => readonly DiscordApiEmbed[];
 export declare const createSafeDiscordMessage: (input: SafeDiscordMessageInput, destinationId: string) => SafeDiscordMessagePayload;

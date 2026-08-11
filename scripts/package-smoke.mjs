@@ -50,15 +50,17 @@ try {
       } from "@anto-project/discord-bot-core";
       import { NodeDiscordRestAdapter } from "@anto-project/discord-bot-core/node";
       const embed = EmbedPlanBuilder.info({ locale: "en" }).description("ok").build();
-      const payload = createSafeDiscordMessage(
-        { deliveryId: "smoke/delivery", embeds: [embed] },
-        "123456789012345678",
-      );
-      if (payload.embeds?.[0]?.description !== "ok") throw new Error("root export failed");
       const row = discordMessageActionRow([
         discordButton({ style: "primary", label: "OK", customId: "smoke:ok" }),
       ]);
-      if (row.components.length !== 1) throw new Error("component export failed");
+      const payload = createSafeDiscordMessage(
+        { deliveryId: "smoke/delivery", embeds: [embed], components: [row] },
+        "123456789012345678",
+      );
+      if (payload.embeds?.[0]?.description !== "ok") throw new Error("root export failed");
+      if (payload.components?.[0]?.components.length !== 1) {
+        throw new Error("component payload export failed");
+      }
       const rest = new NodeDiscordRestAdapter({ botToken: "smoke-token-value-with-enough-length" });
       if (JSON.stringify(rest).includes("smoke-token")) throw new Error("token leaked");
     `,

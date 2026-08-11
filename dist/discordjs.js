@@ -1,9 +1,9 @@
 import { BaseInteraction, Client, DiscordAPIError, Events, GatewayIntentBits, HTTPError, MessageFlags, Partials, REST, RateLimitError, Routes, } from "discord.js";
 import { fingerprintDiscordChatInputCommand, } from "./command-publisher.js";
-import { discordButton, discordMessageActionRow, discordModal, discordStringSelect, discordTextInput, discordUserSelect, } from "./components.js";
+import { discordModal, discordTextInput, } from "./components.js";
 import { DiscordCoreError } from "./errors.js";
 import { parseDiscordSnowflake } from "./identifiers.js";
-import { createSafeDiscordMessage, encodeSafeDiscordEmbeds, } from "./payload.js";
+import { createSafeDiscordMessage, encodeSafeDiscordActionRows, encodeSafeDiscordEmbeds, } from "./payload.js";
 export const DISCORD_GATEWAY_INTENTS = [
     "Guilds",
     "GuildMembers",
@@ -112,14 +112,6 @@ const createClient = (options) => {
         ...(partials === undefined ? {} : { partials: Object.freeze(partials) }),
     });
 };
-const BUTTON_STYLES = Object.freeze({
-    primary: 1,
-    secondary: 2,
-    success: 3,
-    danger: 4,
-    link: 5,
-});
-const encodeEmoji = (emoji) => emoji === undefined ? undefined : Object.freeze({ name: emoji });
 const boundedDataArray = (value, minimum, maximum, label) => {
     if (!Array.isArray(value) ||
         Object.getPrototypeOf(value) !== Array.prototype ||
@@ -136,75 +128,6 @@ const boundedDataArray = (value, minimum, maximum, label) => {
         result.push(descriptor.value);
     }
     return Object.freeze(result);
-};
-const normalizeMessageComponent = (component) => {
-    switch (component.kind) {
-        case "button":
-            return discordButton(component);
-        case "string_select":
-            return discordStringSelect(component);
-        case "user_select":
-            return discordUserSelect(component);
-        default:
-            throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord message component kind is invalid.", false);
-    }
-};
-const encodeButton = (component) => Object.freeze({
-    type: 2,
-    style: BUTTON_STYLES[component.style],
-    ...(component.label === undefined ? {} : { label: component.label }),
-    ...(component.customId === undefined ? {} : { custom_id: component.customId }),
-    ...(component.url === undefined ? {} : { url: component.url }),
-    ...(encodeEmoji(component.emoji) === undefined ? {} : { emoji: encodeEmoji(component.emoji) }),
-    disabled: component.disabled,
-});
-const encodeStringSelect = (component) => Object.freeze({
-    type: 3,
-    custom_id: component.customId,
-    options: component.options.map((option) => Object.freeze({
-        label: option.label,
-        value: option.value,
-        ...(option.description === undefined ? {} : { description: option.description }),
-        ...(encodeEmoji(option.emoji) === undefined ? {} : { emoji: encodeEmoji(option.emoji) }),
-        default: option.default,
-    })),
-    ...(component.placeholder === undefined ? {} : { placeholder: component.placeholder }),
-    min_values: component.minimumValues,
-    max_values: component.maximumValues,
-    disabled: component.disabled,
-});
-const encodeUserSelect = (component) => Object.freeze({
-    type: 5,
-    custom_id: component.customId,
-    ...(component.placeholder === undefined ? {} : { placeholder: component.placeholder }),
-    min_values: component.minimumValues,
-    max_values: component.maximumValues,
-    disabled: component.disabled,
-});
-const encodeMessageComponent = (component) => {
-    switch (component.kind) {
-        case "button":
-            return encodeButton(component);
-        case "string_select":
-            return encodeStringSelect(component);
-        case "user_select":
-            return encodeUserSelect(component);
-        default:
-            throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord message component kind is invalid.", false);
-    }
-};
-const encodeActionRows = (rows) => {
-    if (rows === undefined)
-        return undefined;
-    const sourceRows = boundedDataArray(rows, 0, 5, "Discord action rows");
-    return Object.freeze(sourceRows.map((row) => {
-        const sourceRow = discordMessageActionRow(row.components);
-        const safeRow = discordMessageActionRow(sourceRow.components.map(normalizeMessageComponent));
-        return Object.freeze({
-            type: 1,
-            components: safeRow.components.map(encodeMessageComponent),
-        });
-    }));
 };
 const encodeTextInput = (component) => Object.freeze({
     type: 4,
@@ -236,7 +159,7 @@ const encodeInteractionMessage = (plan, allowVisibility) => {
         throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord interaction content must contain between 1 and 2000 characters.", false);
     }
     const embeds = encodeSafeDiscordEmbeds(plan.embeds);
-    const components = encodeActionRows(plan.components);
+    const components = encodeSafeDiscordActionRows(plan.components);
     if (plan.content === undefined && embeds.length === 0 && (components?.length ?? 0) === 0) {
         throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord response is empty.", false);
     }
@@ -1029,6 +952,14 @@ const providerFailure = (error) => {
 const providerFailureForSignal = (error, signal) => signal?.aborted === true
     ? new DiscordCoreError("DISCORD_CANCELLED", "Discord provider request was cancelled.", false, null, null, error)
     : providerFailure(error);
+const directMessageFailureForSignal = (error, signal) => {
+    if (signal?.aborted === true)
+        return providerFailureForSignal(error, signal);
+    if (error instanceof DiscordAPIError && error.code === 50_007) {
+        return new DiscordCoreError("DISCORD_RECIPIENT_UNREACHABLE", "Discord recipient cannot receive direct messages.", false, error.status);
+    }
+    return providerFailure(error);
+};
 const commandCollectionRoute = (scope) => scope.kind === "global"
     ? Routes.applicationCommands(parseDiscordSnowflake(scope.applicationId, "Discord application id"))
     : Routes.applicationGuildCommands(parseDiscordSnowflake(scope.applicationId, "Discord application id"), parseDiscordSnowflake(scope.guildId, "Discord guild id"));
@@ -1143,15 +1074,20 @@ export class NodeDiscordRestAdapter {
     }
     async sendChannelMessage(input) {
         const channelId = parseDiscordSnowflake(input.channelId, "Discord channel id");
+        return this.sendMessageToChannel(channelId, input.message, input.signal, false);
+    }
+    async sendMessageToChannel(channelId, message, signal, classifyRecipientUnreachable) {
         let response;
         try {
             response = await this.#rest.post(Routes.channelMessages(channelId), {
-                body: createSafeDiscordMessage(input.message, channelId),
-                ...(input.signal === undefined ? {} : { signal: input.signal }),
+                body: createSafeDiscordMessage(message, channelId),
+                ...(signal === undefined ? {} : { signal }),
             });
         }
         catch (error) {
-            throw providerFailureForSignal(error, input.signal);
+            throw classifyRecipientUnreachable
+                ? directMessageFailureForSignal(error, signal)
+                : providerFailureForSignal(error, signal);
         }
         return this.deliveryReceipt(response, channelId);
     }
@@ -1165,14 +1101,10 @@ export class NodeDiscordRestAdapter {
             });
         }
         catch (error) {
-            throw providerFailureForSignal(error, input.signal);
+            throw directMessageFailureForSignal(error, input.signal);
         }
         const channelId = parseDiscordSnowflake(responseString(responseRecord(response), "id", "Discord DM channel id"), "Discord DM channel id");
-        return this.sendChannelMessage({
-            channelId,
-            message: input.message,
-            ...(input.signal === undefined ? {} : { signal: input.signal }),
-        });
+        return this.sendMessageToChannel(channelId, input.message, input.signal, true);
     }
     deliveryReceipt(value, expectedChannelId) {
         const record = responseRecord(value);

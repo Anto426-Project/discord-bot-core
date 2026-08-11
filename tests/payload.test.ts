@@ -6,7 +6,9 @@ import {
   EmbedPlanBuilder,
   createSafeDiscordMessage,
   deterministicDiscordNonce,
+  discordButton,
   discordInteractionCorrelationId,
+  discordMessageActionRow,
   parseDiscordSnowflake,
 } from "../src/index.js";
 
@@ -41,6 +43,65 @@ describe("Discord identifiers and safe payloads", () => {
     });
     assert.equal(payload.enforce_nonce, true);
     assert.equal(payload.embeds?.[0]?.description, "safe");
+  });
+
+  it("safely encodes provider-neutral action rows and permits component-only messages", () => {
+    const payload = createSafeDiscordMessage(
+      {
+        deliveryId: "delivery/component",
+        components: [
+          discordMessageActionRow([
+            discordButton({
+              style: "primary",
+              label: "Open",
+              customId: "message:open",
+            }),
+          ]),
+        ],
+      },
+      CHANNEL_A,
+    );
+
+    assert.deepEqual(payload.components, [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 1,
+            label: "Open",
+            custom_id: "message:open",
+            disabled: false,
+          },
+        ],
+      },
+    ]);
+    assert.equal(Object.isFrozen(payload.components?.[0]?.components), true);
+
+    let accessorRead = false;
+    const unsafeRow = Object.defineProperty(
+      { kind: "message_action_row" },
+      "components",
+      {
+        enumerable: true,
+        get() {
+          accessorRead = true;
+          return [];
+        },
+      },
+    );
+    assert.throws(
+      () =>
+        createSafeDiscordMessage(
+          {
+            deliveryId: "delivery/accessor",
+            components: [unsafeRow as never],
+          },
+          CHANNEL_A,
+        ),
+      /data-only/iu,
+    );
+    assert.equal(accessorRead, false);
   });
 
   it("rejects structural array-method and aggregate-limit bypasses", () => {

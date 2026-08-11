@@ -9,7 +9,8 @@ code consumes only the ports and immutable DTOs exported by this package.
 ## Owned technical boundary
 
 - Discord snowflake validation and deterministic interaction correlation;
-- safe message payloads with closed mention policy and deterministic nonce;
+- safe message plans with embeds, interactive action rows, closed mention policy
+  and deterministic nonce;
 - provider-neutral embed plans and dynamic colors through the separately
   pinned `@anto-project/dynamic-embed-engine` submodule;
 - provider-managed REST buckets and global rate-limit coordination;
@@ -44,6 +45,11 @@ runtime communication between the two products.
 - Message mentions are disabled unless an exact user or role allowlist is
   supplied.
 - Every message carries a deterministic nonce and `enforce_nonce=true`.
+- Outbound messages and interaction responses share one fail-closed component
+  encoder; provider action-row shapes never enter product code.
+- Direct-message delivery classifies a recipient as unreachable only for the
+  provider's explicit cannot-message error code; other forbidden responses stay
+  generic provider failures.
 - SDK request time and retry attempts are bounded; provider Retry-After values
   are never shortened into an early retry.
 - Bot tokens and provider bodies are never included in public errors.

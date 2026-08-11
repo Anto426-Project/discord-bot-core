@@ -23,21 +23,12 @@ import {
   type DiscordRemoteApplicationCommand,
 } from "./command-publisher.js";
 import type {
-  DiscordButtonComponent,
-  DiscordMessageActionRow,
-  DiscordMessageComponent,
   DiscordModalPlan,
-  DiscordStringSelectComponent,
   DiscordTextInputComponent,
-  DiscordUserSelectComponent,
 } from "./components.js";
 import {
-  discordButton,
-  discordMessageActionRow,
   discordModal,
-  discordStringSelect,
   discordTextInput,
-  discordUserSelect,
 } from "./components.js";
 import type {
   DiscordChannelMessageDelivery,
@@ -70,6 +61,7 @@ import type {
 } from "./interactions.js";
 import {
   createSafeDiscordMessage,
+  encodeSafeDiscordActionRows,
   encodeSafeDiscordEmbeds,
 } from "./payload.js";
 
@@ -244,17 +236,6 @@ const createClient = (options: NodeDiscordClientOptions): Client => {
   });
 };
 
-const BUTTON_STYLES: Readonly<Record<DiscordButtonComponent["style"], number>> = Object.freeze({
-  primary: 1,
-  secondary: 2,
-  success: 3,
-  danger: 4,
-  link: 5,
-});
-
-const encodeEmoji = (emoji: string | undefined): Readonly<{ name: string }> | undefined =>
-  emoji === undefined ? undefined : Object.freeze({ name: emoji });
-
 const boundedDataArray = <T>(
   value: readonly T[],
   minimum: number,
@@ -282,107 +263,6 @@ const boundedDataArray = <T>(
     result.push(descriptor.value as T);
   }
   return Object.freeze(result);
-};
-
-const normalizeMessageComponent = (
-  component: DiscordMessageComponent,
-): DiscordMessageComponent => {
-  switch (component.kind) {
-    case "button":
-      return discordButton(component);
-    case "string_select":
-      return discordStringSelect(component);
-    case "user_select":
-      return discordUserSelect(component);
-    default:
-      throw new DiscordCoreError(
-        "DISCORD_PAYLOAD_REJECTED",
-        "Discord message component kind is invalid.",
-        false,
-      );
-  }
-};
-
-const encodeButton = (component: DiscordButtonComponent): Readonly<Record<string, unknown>> =>
-  Object.freeze({
-    type: 2,
-    style: BUTTON_STYLES[component.style],
-    ...(component.label === undefined ? {} : { label: component.label }),
-    ...(component.customId === undefined ? {} : { custom_id: component.customId }),
-    ...(component.url === undefined ? {} : { url: component.url }),
-    ...(encodeEmoji(component.emoji) === undefined ? {} : { emoji: encodeEmoji(component.emoji) }),
-    disabled: component.disabled,
-  });
-
-const encodeStringSelect = (
-  component: DiscordStringSelectComponent,
-): Readonly<Record<string, unknown>> =>
-  Object.freeze({
-    type: 3,
-    custom_id: component.customId,
-    options: component.options.map((option) =>
-      Object.freeze({
-        label: option.label,
-        value: option.value,
-        ...(option.description === undefined ? {} : { description: option.description }),
-        ...(encodeEmoji(option.emoji) === undefined ? {} : { emoji: encodeEmoji(option.emoji) }),
-        default: option.default,
-      }),
-    ),
-    ...(component.placeholder === undefined ? {} : { placeholder: component.placeholder }),
-    min_values: component.minimumValues,
-    max_values: component.maximumValues,
-    disabled: component.disabled,
-  });
-
-const encodeUserSelect = (
-  component: DiscordUserSelectComponent,
-): Readonly<Record<string, unknown>> =>
-  Object.freeze({
-    type: 5,
-    custom_id: component.customId,
-    ...(component.placeholder === undefined ? {} : { placeholder: component.placeholder }),
-    min_values: component.minimumValues,
-    max_values: component.maximumValues,
-    disabled: component.disabled,
-  });
-
-const encodeMessageComponent = (
-  component: DiscordMessageComponent,
-): Readonly<Record<string, unknown>> => {
-  switch (component.kind) {
-    case "button":
-      return encodeButton(component);
-    case "string_select":
-      return encodeStringSelect(component);
-    case "user_select":
-      return encodeUserSelect(component);
-    default:
-      throw new DiscordCoreError(
-        "DISCORD_PAYLOAD_REJECTED",
-        "Discord message component kind is invalid.",
-        false,
-      );
-  }
-};
-
-const encodeActionRows = (
-  rows: readonly DiscordMessageActionRow[] | undefined,
-): readonly Readonly<Record<string, unknown>>[] | undefined => {
-  if (rows === undefined) return undefined;
-  const sourceRows = boundedDataArray(rows, 0, 5, "Discord action rows");
-  return Object.freeze(
-    sourceRows.map((row) => {
-      const sourceRow = discordMessageActionRow(row.components);
-      const safeRow = discordMessageActionRow(
-        sourceRow.components.map(normalizeMessageComponent),
-      );
-      return Object.freeze({
-        type: 1,
-        components: safeRow.components.map(encodeMessageComponent),
-      });
-    }),
-  );
 };
 
 const encodeTextInput = (
@@ -431,7 +311,7 @@ const encodeInteractionMessage = (
     );
   }
   const embeds = encodeSafeDiscordEmbeds(plan.embeds);
-  const components = encodeActionRows(plan.components);
+  const components = encodeSafeDiscordActionRows(plan.components);
   if (plan.content === undefined && embeds.length === 0 && (components?.length ?? 0) === 0) {
     throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord response is empty.", false);
   }
@@ -1513,6 +1393,22 @@ const providerFailureForSignal = (error: unknown, signal: AbortSignal | undefine
       )
     : providerFailure(error);
 
+const directMessageFailureForSignal = (
+  error: unknown,
+  signal: AbortSignal | undefined,
+): DiscordCoreError => {
+  if (signal?.aborted === true) return providerFailureForSignal(error, signal);
+  if (error instanceof DiscordAPIError && error.code === 50_007) {
+    return new DiscordCoreError(
+      "DISCORD_RECIPIENT_UNREACHABLE",
+      "Discord recipient cannot receive direct messages.",
+      false,
+      error.status,
+    );
+  }
+  return providerFailure(error);
+};
+
 const commandCollectionRoute = (scope: DiscordCommandPublicationScope): `/${string}` =>
   scope.kind === "global"
     ? Routes.applicationCommands(parseDiscordSnowflake(scope.applicationId, "Discord application id"))
@@ -1697,14 +1593,25 @@ export class NodeDiscordRestAdapter
     input: DiscordChannelMessageDelivery,
   ): Promise<DiscordDeliveryReceipt> {
     const channelId = parseDiscordSnowflake(input.channelId, "Discord channel id");
+    return this.sendMessageToChannel(channelId, input.message, input.signal, false);
+  }
+
+  private async sendMessageToChannel(
+    channelId: string,
+    message: DiscordChannelMessageDelivery["message"],
+    signal: AbortSignal | undefined,
+    classifyRecipientUnreachable: boolean,
+  ): Promise<DiscordDeliveryReceipt> {
     let response: unknown;
     try {
       response = await this.#rest.post(Routes.channelMessages(channelId), {
-        body: createSafeDiscordMessage(input.message, channelId),
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        body: createSafeDiscordMessage(message, channelId),
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (error: unknown) {
-      throw providerFailureForSignal(error, input.signal);
+      throw classifyRecipientUnreachable
+        ? directMessageFailureForSignal(error, signal)
+        : providerFailureForSignal(error, signal);
     }
     return this.deliveryReceipt(response, channelId);
   }
@@ -1720,17 +1627,13 @@ export class NodeDiscordRestAdapter
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch (error: unknown) {
-      throw providerFailureForSignal(error, input.signal);
+      throw directMessageFailureForSignal(error, input.signal);
     }
     const channelId = parseDiscordSnowflake(
       responseString(responseRecord(response), "id", "Discord DM channel id"),
       "Discord DM channel id",
     );
-    return this.sendChannelMessage({
-      channelId,
-      message: input.message,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    return this.sendMessageToChannel(channelId, input.message, input.signal, true);
   }
 
   private deliveryReceipt(value: unknown, expectedChannelId: string): DiscordDeliveryReceipt {

@@ -65,6 +65,7 @@ export declare class NodeDiscordRestAdapter implements DiscordApplicationCommand
     updateApplicationCommand(scope: DiscordCommandPublicationScope, providerCommandId: string, command: DiscordApplicationCommandBody, signal?: AbortSignal): Promise<DiscordRemoteApplicationCommand>;
     deleteApplicationCommand(scope: DiscordCommandPublicationScope, providerCommandId: string, signal?: AbortSignal): Promise<"deleted" | "already_absent">;
     sendChannelMessage(input: DiscordChannelMessageDelivery): Promise<DiscordDeliveryReceipt>;
+    private sendMessageToChannel;
     sendDirectMessage(input: DiscordDirectMessageDelivery): Promise<DiscordDeliveryReceipt>;
     private deliveryReceipt;
 }
