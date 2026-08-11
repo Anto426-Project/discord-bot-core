@@ -103,6 +103,22 @@ describe("discord bot core architecture", () => {
     });
     assert.equal(runtime.commands, runtime.messages);
     assert.equal(runtime.extensions, runtime.gateway);
+    assert.equal(runtime.inspection, runtime.gateway);
+    assert.equal(runtime.guilds, runtime.gateway);
+    assert.equal(runtime.profiles, runtime.gateway);
+    assert.equal(runtime.presence, runtime.gateway);
     assert.doesNotMatch(JSON.stringify(runtime), /provider-token/u);
+  });
+
+  it("keeps the provider extension bridge opaque in public declarations", async () => {
+    const source = await readFile(path.resolve("src/discordjs.ts"), "utf8");
+    const declarations = await readFile(path.resolve("dist/discordjs.d.ts"), "utf8");
+    assert.match(
+      declarations,
+      /createNodeDiscordProviderExtension: \(options: NodeDiscordProviderExtensionOptions\) => unknown/u,
+    );
+    assert.match(declarations, /bindProviderClient\(providerClient: unknown, generation: number\): void/u);
+    assert.doesNotMatch(declarations, /provider-extension\/v1|unique symbol|Client<|\bClient\b/u);
+    assert.doesNotMatch(source, /Symbol\.for\(/u);
   });
 });

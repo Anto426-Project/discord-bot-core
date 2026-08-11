@@ -48,7 +48,11 @@ try {
         discordButton,
         discordMessageActionRow,
       } from "@anto-project/discord-bot-core";
-      import { NodeDiscordRestAdapter } from "@anto-project/discord-bot-core/node";
+      import {
+        NodeDiscordRestAdapter,
+        createNodeDiscordProviderExtension,
+        createNodeDiscordRuntime,
+      } from "@anto-project/discord-bot-core/node";
       const embed = EmbedPlanBuilder.info({ locale: "en" }).description("ok").build();
       const row = discordMessageActionRow([
         discordButton({ style: "primary", label: "OK", customId: "smoke:ok" }),
@@ -63,6 +67,25 @@ try {
       }
       const rest = new NodeDiscordRestAdapter({ botToken: "smoke-token-value-with-enough-length" });
       if (JSON.stringify(rest).includes("smoke-token")) throw new Error("token leaked");
+      const runtime = createNodeDiscordRuntime({
+        botToken: "runtime-smoke-token-value-with-enough-length",
+        gateway: { intents: ["Guilds"] },
+      });
+      if (
+        runtime.inspection !== runtime.gateway ||
+        runtime.guilds !== runtime.gateway ||
+        runtime.profiles !== runtime.gateway ||
+        runtime.presence !== runtime.gateway
+      ) {
+        throw new Error("runtime service composition failed");
+      }
+      const extension = createNodeDiscordProviderExtension({
+        key: "smoke.extension",
+        bindProviderClient() {},
+        async releaseProviderClient() {},
+      });
+      if (JSON.stringify(extension) !== "{}") throw new Error("extension bridge is not opaque");
+      await runtime.gateway.stop();
     `,
   );
   execFileSync(process.execPath, ["smoke.mjs"], { cwd: consumer, stdio: "inherit" });

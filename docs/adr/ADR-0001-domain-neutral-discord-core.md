@@ -29,7 +29,17 @@ Concrete provider extensions register through an opaque host port before the
 gateway lifecycle starts. The internal client is bound with a monotonic
 generation and released, with a deadline, before that generation is destroyed.
 Failed or incomplete release is quarantined and blocks rebinding; products
-never receive the client or the private extension protocol.
+never receive the client or the private extension protocol. A callback-only
+factory constructs that opaque protocol object inside this package; the owning
+product invokes and composes companion technical cores, while this package
+never calls a product use case or another core autonomously.
+
+Inspection, guild-directory, profile and presence ports read only the currently
+owned client generation. Provider fetches are bounded by a total deadline and
+in-flight capacity. Shutdown aborts the public waiters, and a result captured
+from an older client is rejected even if its SDK operation settles after a
+restart. Profile assets are fully materialized as primitive HTTPS CDN URLs;
+provider objects and lazy callbacks never cross the adapter boundary.
 
 The package is not a service. It has no service key, listener, database,
 runtime lease, diagnostics endpoint, environment reader or private key.

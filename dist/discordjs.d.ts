@@ -2,7 +2,11 @@ import type { DiscordApplicationCommandBody } from "./command-model.js";
 import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublicationScope, type DiscordRemoteApplicationCommand } from "./command-publisher.js";
 import type { DiscordChannelMessageDelivery, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordMessageDeliveryPort } from "./delivery.js";
 import type { DiscordGatewayIdentity, DiscordGatewayLifecycleListener, DiscordGatewayRuntimePort } from "./gateway.js";
+import type { DiscordGuildDirectoryPort, DiscordGuildMemberListInput, DiscordGuildMemberPage, DiscordGuildRoleListInput, DiscordGuildRoleSnapshot } from "./guild-directory.js";
+import type { DiscordGatewayInspectionPort, DiscordGatewayInspectionSnapshot } from "./inspection.js";
 import type { DiscordInteraction, DiscordInteractionListener } from "./interactions.js";
+import type { DiscordPresencePlan, DiscordPresencePort } from "./presence.js";
+import type { DiscordGuildProfile, DiscordGuildProfileReadInput, DiscordMemberProfile, DiscordMemberProfileReadInput, DiscordProfileQueryPort, DiscordUserProfile, DiscordUserProfileReadInput } from "./profiles.js";
 export type DiscordPrivilegedGatewayIntent = "GuildMembers" | "GuildPresences" | "MessageContent";
 export declare const DISCORD_GATEWAY_INTENTS: readonly ["Guilds", "GuildMembers", "GuildModeration", "GuildExpressions", "GuildIntegrations", "GuildWebhooks", "GuildInvites", "GuildVoiceStates", "GuildPresences", "GuildMessages", "GuildMessageReactions", "GuildMessageTyping", "DirectMessages", "DirectMessageReactions", "DirectMessageTyping", "MessageContent", "GuildScheduledEvents", "AutoModerationConfiguration", "AutoModerationExecution", "GuildMessagePolls", "DirectMessagePolls"];
 export type DiscordGatewayIntent = (typeof DISCORD_GATEWAY_INTENTS)[number];
@@ -16,6 +20,8 @@ export interface NodeDiscordGatewayOptions {
     readonly waitGuildTimeoutMs?: number;
     readonly startupTimeoutMs?: number;
     readonly listenerTimeoutMs?: number;
+    readonly queryTimeoutMs?: number;
+    readonly maximumConcurrentQueries?: number;
 }
 /**
  * Converts a provider-owned Node interaction into the stable core DTO.
@@ -29,7 +35,18 @@ export declare const normalizeNodeDiscordInteraction: (value: unknown) => Discor
 export interface NodeDiscordProviderExtensionHostPort {
     registerProviderExtension(extension: unknown): Promise<() => Promise<void>>;
 }
-export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort {
+export interface NodeDiscordProviderExtensionOptions {
+    readonly key: string;
+    bindProviderClient(providerClient: unknown, generation: number): void;
+    releaseProviderClient(generation: number, signal: AbortSignal): Promise<void>;
+}
+/**
+ * Creates the opaque bridge understood by the Node runtime. The private Symbol
+ * and protocol shape remain owned here; companion packages expose ordinary
+ * callbacks and do not need to duplicate this implementation detail.
+ */
+export declare const createNodeDiscordProviderExtension: (options: NodeDiscordProviderExtensionOptions) => unknown;
+export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort, DiscordGatewayInspectionPort, DiscordGuildDirectoryPort, DiscordProfileQueryPort, DiscordPresencePort {
     #private;
     constructor(options: NodeDiscordGatewayOptions);
     start(signal?: AbortSignal): Promise<DiscordGatewayIdentity>;
@@ -37,6 +54,14 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     isReady(): boolean;
     subscribeLifecycle(listener: DiscordGatewayLifecycleListener): () => void;
     subscribeInteractions(listener: DiscordInteractionListener): () => void;
+    capture(): DiscordGatewayInspectionSnapshot;
+    listRoles(input: DiscordGuildRoleListInput): Promise<readonly DiscordGuildRoleSnapshot[]>;
+    listMembers(input: DiscordGuildMemberListInput): Promise<DiscordGuildMemberPage>;
+    readUser(input: DiscordUserProfileReadInput): Promise<DiscordUserProfile | null>;
+    readMember(input: DiscordMemberProfileReadInput): Promise<DiscordMemberProfile | null>;
+    readGuild(input: DiscordGuildProfileReadInput): Promise<DiscordGuildProfile | null>;
+    apply(plan: DiscordPresencePlan): Promise<void>;
+    clear(signal?: AbortSignal): Promise<void>;
     registerProviderExtension(extension: unknown): Promise<() => Promise<void>>;
     toJSON(): Readonly<{
         component: "node-discord-gateway-adapter";
@@ -77,6 +102,10 @@ export interface NodeDiscordRuntimeOptions {
 export type NodeDiscordRuntimeServices = Readonly<{
     gateway: DiscordGatewayRuntimePort;
     extensions: NodeDiscordProviderExtensionHostPort;
+    inspection: DiscordGatewayInspectionPort;
+    guilds: DiscordGuildDirectoryPort;
+    profiles: DiscordProfileQueryPort;
+    presence: DiscordPresencePort;
     commands: DiscordApplicationCommandsRestPort;
     messages: DiscordMessageDeliveryPort;
 }>;

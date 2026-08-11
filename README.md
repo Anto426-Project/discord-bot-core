@@ -17,8 +17,11 @@ code consumes only the ports and immutable DTOs exported by this package.
 - safe provider receipts and redacted errors;
 - application-command projection and ownership-safe reconciliation;
 - explicit interaction and event routers;
+- generation-scoped gateway inspection, bounded guild/member directory reads,
+  immutable profile projections and presence control;
 - an opaque, generation-aware provider-extension host for concrete technical
-  adapters such as music playback, without exposing the SDK client;
+  adapters such as music playback, plus a callback-only bridge factory that
+  lets the product compose them without exposing the SDK client or protocol;
 - bounded runtime availability/degradation tracking.
 
 The package is stateless with respect to product domains. Credentials,
@@ -59,6 +62,9 @@ runtime communication between the two products.
 - Extensions register before lifecycle start, release before client destroy,
   and remain quarantined after a failed or timed-out cleanup; a stale
   generation can never be rebound over a cleanup still in flight.
+- Directory/profile operations have one total deadline, a bounded in-flight
+  capacity and a gateway-generation cancellation signal. A stopped client can
+  never return a late result into a restarted product runtime.
 
 ## Submodule consumption
 

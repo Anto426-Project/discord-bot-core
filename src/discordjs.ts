@@ -1,5 +1,7 @@
 import {
+  ActivityType,
   BaseInteraction,
+  ChannelType,
   Client,
   DiscordAPIError,
   Events,
@@ -7,12 +9,18 @@ import {
   HTTPError,
   MessageFlags,
   Partials,
+  PermissionFlagsBits,
   REST,
   RateLimitError,
   Routes,
+  version as discordJsVersion,
   type ChatInputCommandInteraction,
+  type Guild,
+  type GuildMember,
   type Interaction,
   type RepliableInteraction,
+  type Role,
+  type User,
 } from "discord.js";
 
 import type { DiscordApplicationCommandBody } from "./command-model.js";
@@ -43,7 +51,21 @@ import type {
   DiscordGatewayLifecycleListener,
   DiscordGatewayRuntimePort,
 } from "./gateway.js";
+import type {
+  DiscordGuildDirectoryPort,
+  DiscordGuildMemberListInput,
+  DiscordGuildMemberPage,
+  DiscordGuildMemberSnapshot,
+  DiscordGuildPermission,
+  DiscordGuildRoleListInput,
+  DiscordGuildRoleSnapshot,
+} from "./guild-directory.js";
 import { parseDiscordSnowflake } from "./identifiers.js";
+import type {
+  DiscordGatewayInspectionPort,
+  DiscordGatewayInspectionSnapshot,
+  DiscordGuildInventoryEntry,
+} from "./inspection.js";
 import type {
   DiscordChatInputInteraction,
   DiscordCommandOptionsPort,
@@ -64,6 +86,25 @@ import {
   encodeSafeDiscordActionRows,
   encodeSafeDiscordEmbeds,
 } from "./payload.js";
+import type {
+  DiscordPresenceActivityType,
+  DiscordPresencePlan,
+  DiscordPresencePort,
+  DiscordPresenceStatus,
+} from "./presence.js";
+import type {
+  DiscordGuildProfile,
+  DiscordGuildProfileReadInput,
+  DiscordImageAsset,
+  DiscordImageFormat,
+  DiscordImageSize,
+  DiscordMemberProfile,
+  DiscordMemberProfileReadInput,
+  DiscordProfileQueryPort,
+  DiscordProfileReadMode,
+  DiscordUserProfile,
+  DiscordUserProfileReadInput,
+} from "./profiles.js";
 
 export type DiscordPrivilegedGatewayIntent =
   | "GuildMembers"
@@ -156,6 +197,8 @@ export interface NodeDiscordGatewayOptions {
   readonly waitGuildTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
   readonly listenerTimeoutMs?: number;
+  readonly queryTimeoutMs?: number;
+  readonly maximumConcurrentQueries?: number;
 }
 
 type NodeDiscordClientOptions = Readonly<{
@@ -263,6 +306,469 @@ const boundedDataArray = <T>(
     result.push(descriptor.value as T);
   }
   return Object.freeze(result);
+};
+
+const MAXIMUM_CACHED_GUILDS = 100_000;
+const MAXIMUM_GUILD_ROLES = 500;
+const MAXIMUM_MEMBER_PAGE_SIZE = 1_000;
+const MAXIMUM_MEMBER_ROLE_IDS = 500;
+const MAXIMUM_GUILD_MEMBERS = 100_000_000;
+
+const responseBoundedInteger = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+  return value as number;
+};
+
+const responseBoolean = (value: unknown, label: string): boolean => {
+  if (typeof value !== "boolean") {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+  return value;
+};
+
+const responseSnowflake = (value: unknown, label: string): string => {
+  if (typeof value !== "string") {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+  try {
+    return parseDiscordSnowflake(value, label);
+  } catch {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+};
+
+const responseTextValue = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string,
+): string => {
+  if (
+    typeof value !== "string" ||
+    value.length < minimum ||
+    value.length > maximum ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
+  ) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+  return value;
+};
+
+const responseNullableTextValue = (
+  value: unknown,
+  maximum: number,
+  label: string,
+): string | null =>
+  value === null
+    ? null
+    : responseTextValue(value, 0, maximum, label);
+
+const responseTimestamp = (value: unknown, label: string): string => {
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+  const timestamp = value.toISOString();
+  if (Date.parse(timestamp) !== value.getTime()) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+  }
+  return timestamp;
+};
+
+const responseNullableTimestamp = (value: unknown, label: string): string | null =>
+  value === null ? null : responseTimestamp(value, label);
+
+const IMAGE_FORMATS = Object.freeze([
+  "png",
+  "jpg",
+  "webp",
+] as const satisfies readonly DiscordImageFormat[]);
+const IMAGE_SIZES = Object.freeze([
+  512,
+  1_024,
+  4_096,
+] as const satisfies readonly DiscordImageSize[]);
+const DISCORD_ASSET_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
+
+const responseAssetUrl = (
+  value: unknown,
+  format: DiscordImageFormat,
+  size: DiscordImageSize,
+): string => {
+  if (typeof value !== "string" || value.length < 1 || value.length > 2_048) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord asset URL is invalid.", false);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord asset URL is invalid.", false);
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    !DISCORD_ASSET_HOSTS.has(parsed.hostname) ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.port !== "" ||
+    parsed.hash !== "" ||
+    !parsed.pathname.toLowerCase().endsWith(`.${format}`) ||
+    parsed.searchParams.get("size") !== String(size) ||
+    [...parsed.searchParams.keys()].some((key) => key !== "size")
+  ) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord asset URL is invalid.", false);
+  }
+  return parsed.toString();
+};
+
+const materializeImageAsset = (
+  render: (format: DiscordImageFormat, size: DiscordImageSize) => string | null,
+): DiscordImageAsset | null => {
+  const urls: Partial<Record<
+    DiscordImageFormat,
+    Readonly<Record<DiscordImageSize, string>>
+  >> = {};
+  let present: boolean | null = null;
+  for (const format of IMAGE_FORMATS) {
+    const sizes = {} as Record<DiscordImageSize, string>;
+    for (const size of IMAGE_SIZES) {
+      const rendered = render(format, size);
+      const hasValue = rendered !== null;
+      present ??= hasValue;
+      if (present !== hasValue) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord asset variants are inconsistent.",
+          false,
+        );
+      }
+      if (rendered !== null) sizes[size] = responseAssetUrl(rendered, format, size);
+    }
+    if (present === true) urls[format] = Object.freeze(sizes);
+  }
+  return present === true
+    ? Object.freeze({ urls: Object.freeze(urls) })
+    : null;
+};
+
+const materializeDefaultUserImageAsset = (value: unknown): DiscordImageAsset => {
+  if (typeof value !== "string" || value.length < 1 || value.length > 2_048) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord asset URL is invalid.", false);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord asset URL is invalid.", false);
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    !DISCORD_ASSET_HOSTS.has(parsed.hostname) ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.port !== "" ||
+    parsed.hash !== "" ||
+    !/^\/embed\/avatars\/[0-9]+\.png$/u.test(parsed.pathname) ||
+    [...parsed.searchParams.keys()].some((key) => key !== "size")
+  ) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord asset URL is invalid.", false);
+  }
+  const sizes = {} as Record<DiscordImageSize, string>;
+  for (const size of IMAGE_SIZES) {
+    const rendered = new URL(parsed);
+    rendered.searchParams.set("size", String(size));
+    sizes[size] = responseAssetUrl(rendered.toString(), "png", size);
+  }
+  return Object.freeze({
+    urls: Object.freeze({ png: Object.freeze(sizes) }),
+  });
+};
+
+const userImageAsset = (user: User): DiscordImageAsset => {
+  if (user.avatar === null) {
+    return materializeDefaultUserImageAsset(user.defaultAvatarURL);
+  }
+  const asset = materializeImageAsset((format, size) =>
+    user.displayAvatarURL({ extension: format, size, forceStatic: true }),
+  );
+  if (asset === null) {
+    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord user avatar is unavailable.", false);
+  }
+  return asset;
+};
+
+const GUILD_PERMISSION_FLAGS = Object.freeze([
+  ["administrator", PermissionFlagsBits.Administrator],
+  ["manage_guild", PermissionFlagsBits.ManageGuild],
+  ["manage_roles", PermissionFlagsBits.ManageRoles],
+  ["moderate_members", PermissionFlagsBits.ModerateMembers],
+  ["ban_members", PermissionFlagsBits.BanMembers],
+  ["kick_members", PermissionFlagsBits.KickMembers],
+] as const satisfies readonly (readonly [DiscordGuildPermission, bigint])[]);
+
+const roleSnapshot = (role: Role, expectedGuildId: string): DiscordGuildRoleSnapshot => {
+  const guildId = responseSnowflake(role.guild.id, "Discord role guild id");
+  if (guildId !== expectedGuildId) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord role belongs to another guild.",
+      false,
+    );
+  }
+  const permissions: DiscordGuildPermission[] = [];
+  for (const [permission, flag] of GUILD_PERMISSION_FLAGS) {
+    if (role.permissions.has(flag)) permissions.push(permission);
+  }
+  const id = responseSnowflake(role.id, "Discord role id");
+  return Object.freeze({
+    guildId,
+    id,
+    name: responseTextValue(role.name, 1, 100, "Discord role name"),
+    colorValue: responseBoundedInteger(role.color, 0, 0xff_ff_ff, "Discord role color"),
+    position: responseBoundedInteger(role.position, 0, MAXIMUM_GUILD_ROLES, "Discord role position"),
+    managed: responseBoolean(role.managed, "Discord role managed flag"),
+    everyone: id === guildId,
+    editable: responseBoolean(role.editable, "Discord role editable flag"),
+    permissions: Object.freeze(permissions),
+  });
+};
+
+const memberRoleIds = (member: GuildMember, expectedGuildId: string): readonly string[] => {
+  if (member.guild.id !== expectedGuildId) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord member role collection is invalid.",
+      false,
+    );
+  }
+  if (member.roles.cache.size > MAXIMUM_MEMBER_ROLE_IDS) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_TOO_LARGE",
+      "Discord member role collection exceeds its limit.",
+      false,
+    );
+  }
+  const ids: string[] = [];
+  const unique = new Set<string>();
+  for (const [cacheId, role] of member.roles.cache) {
+    const id = responseSnowflake(role.id, "Discord member role id");
+    const guildId = responseSnowflake(role.guild.id, "Discord member role guild id");
+    if (cacheId !== id || guildId !== expectedGuildId || unique.has(id)) {
+      throw new DiscordCoreError(
+        "DISCORD_RESPONSE_INVALID",
+        "Discord member role collection is inconsistent.",
+        false,
+      );
+    }
+    unique.add(id);
+    ids.push(id);
+  }
+  ids.sort((left, right) => left.localeCompare(right, "en"));
+  return Object.freeze(ids);
+};
+
+const memberSnapshot = (
+  member: GuildMember,
+  expectedGuildId: string,
+): DiscordGuildMemberSnapshot => {
+  const guildId = responseSnowflake(member.guild.id, "Discord member guild id");
+  if (guildId !== expectedGuildId) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord member belongs to another guild.",
+      false,
+    );
+  }
+  return Object.freeze({
+    guildId,
+    userId: responseSnowflake(member.id, "Discord member user id"),
+    username: responseTextValue(member.user.username, 1, 80, "Discord member username"),
+    displayName: responseTextValue(member.displayName, 1, 128, "Discord member display name"),
+    avatarHash: responseNullableTextValue(member.user.avatar, 256, "Discord member avatar hash"),
+    nickname: responseNullableTextValue(member.nickname, 128, "Discord member nickname"),
+    joinedAt: responseNullableTimestamp(member.joinedAt, "Discord member join timestamp"),
+    bot: responseBoolean(member.user.bot, "Discord member bot flag"),
+    roleIds: memberRoleIds(member, guildId),
+  });
+};
+
+const inventoryEntry = (guild: Guild): DiscordGuildInventoryEntry =>
+  Object.freeze({
+    id: responseSnowflake(guild.id, "Discord guild id"),
+    name: responseTextValue(guild.name, 1, 100, "Discord guild name"),
+    shardId: responseBoundedInteger(guild.shardId, 0, 4_095, "Discord guild shard id"),
+    memberCount: responseBoundedInteger(
+      guild.memberCount,
+      0,
+      MAXIMUM_GUILD_MEMBERS,
+      "Discord guild member count",
+    ),
+  });
+
+const userProfile = (user: User): DiscordUserProfile =>
+  Object.freeze({
+    id: responseSnowflake(user.id, "Discord user id"),
+    username: responseTextValue(user.username, 1, 80, "Discord username"),
+    displayName: responseTextValue(user.displayName, 1, 128, "Discord user display name"),
+    tag: responseTextValue(user.tag, 1, 128, "Discord user tag"),
+    bot: responseBoolean(user.bot, "Discord user bot flag"),
+    createdAt: responseTimestamp(user.createdAt, "Discord user creation timestamp"),
+    avatar: userImageAsset(user),
+  });
+
+const memberProfile = (member: GuildMember, expectedGuildId: string): DiscordMemberProfile => {
+  const snapshot = memberSnapshot(member, expectedGuildId);
+  if (member.roles.cache.size > MAXIMUM_GUILD_ROLES) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_TOO_LARGE",
+      "Discord member role profile exceeds its limit.",
+      false,
+    );
+  }
+  const roles = [...member.roles.cache.values()]
+    .map((role) => roleSnapshot(role, snapshot.guildId))
+    .sort((left, right) => left.id.localeCompare(right.id, "en"));
+  if (
+    roles.length !== snapshot.roleIds.length ||
+    roles.some((role, index) => role.id !== snapshot.roleIds[index])
+  ) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord member role profile is inconsistent.",
+      false,
+    );
+  }
+  return Object.freeze({
+    guildId: snapshot.guildId,
+    userId: snapshot.userId,
+    displayName: snapshot.displayName,
+    nickname: snapshot.nickname,
+    joinedAt: snapshot.joinedAt,
+    roles: Object.freeze(roles),
+  });
+};
+
+const guildProfile = (guild: Guild): DiscordGuildProfile => {
+  const inventory = inventoryEntry(guild);
+  return Object.freeze({
+    ...inventory,
+    ownerId: responseSnowflake(guild.ownerId, "Discord guild owner id"),
+    description: responseNullableTextValue(guild.description, 4_096, "Discord guild description"),
+    premiumTier: responseBoundedInteger(guild.premiumTier, 0, 3, "Discord guild premium tier"),
+    premiumSubscriptionCount: responseBoundedInteger(
+      guild.premiumSubscriptionCount ?? 0,
+      0,
+      MAXIMUM_GUILD_MEMBERS,
+      "Discord guild premium subscription count",
+    ),
+    createdAt: responseTimestamp(guild.createdAt, "Discord guild creation timestamp"),
+    icon: materializeImageAsset((format, size) =>
+      guild.iconURL({ extension: format, size, forceStatic: true }),
+    ),
+    banner: materializeImageAsset((format, size) =>
+      guild.bannerURL({ extension: format, size, forceStatic: true }),
+    ),
+    splash: materializeImageAsset((format, size) =>
+      guild.splashURL({ extension: format, size, forceStatic: true }),
+    ),
+  });
+};
+
+const PRESENCE_ACTIVITY_TYPES: Readonly<Record<DiscordPresenceActivityType, ActivityType>> =
+  Object.freeze({
+    playing: ActivityType.Playing,
+    listening: ActivityType.Listening,
+    watching: ActivityType.Watching,
+    streaming: ActivityType.Streaming,
+    competing: ActivityType.Competing,
+  });
+
+const PRESENCE_STATUSES = new Set<DiscordPresenceStatus>([
+  "online",
+  "idle",
+  "dnd",
+  "invisible",
+]);
+
+const TEXT_CHANNEL_TYPES = new Set<ChannelType>([
+  ChannelType.GuildText,
+  ChannelType.GuildAnnouncement,
+  ChannelType.GuildForum,
+  ChannelType.GuildMedia,
+]);
+
+const VOICE_CHANNEL_TYPES = new Set<ChannelType>([
+  ChannelType.GuildVoice,
+  ChannelType.GuildStageVoice,
+]);
+
+const isProviderNotFoundError = (error: unknown): boolean => {
+  if (error instanceof DiscordAPIError) {
+    return error.status === 404 || error.code === 10_004 || error.code === 10_007 || error.code === 10_013;
+  }
+  if (error === null || typeof error !== "object") return false;
+  const status = Reflect.get(error, "status");
+  const code = Reflect.get(error, "code");
+  return status === 404 || code === 10_004 || code === 10_007 || code === 10_013;
+};
+
+const profileReadMode = (value: unknown): DiscordProfileReadMode => {
+  const resolved = value ?? "cache_or_fetch";
+  if (resolved !== "cache" && resolved !== "cache_or_fetch" && resolved !== "provider") {
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord profile read mode is invalid.", false);
+  }
+  return resolved;
+};
+
+const inputPageLimit = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > MAXIMUM_MEMBER_PAGE_SIZE) {
+    throw new DiscordCoreError(
+      "DISCORD_INVALID_INPUT",
+      `Discord member page limit must be an integer from 1 to ${MAXIMUM_MEMBER_PAGE_SIZE}.`,
+      false,
+    );
+  }
+  return value as number;
+};
+
+const inputDataProperty = (
+  input: unknown,
+  key: string,
+  label: string,
+  optional = false,
+): unknown => {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(input, key);
+  if (descriptor === undefined) {
+    if (optional) return undefined;
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+  }
+  if (!("value" in descriptor)) {
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+  }
+  return descriptor.value;
+};
+
+const inputSnowflake = (value: unknown, label: string): string => {
+  if (typeof value !== "string") {
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+  }
+  return parseDiscordSnowflake(value, label);
+};
+
+const inputAbortSignal = (value: unknown, label: string): AbortSignal | undefined => {
+  if (value === undefined) return undefined;
+  if (!(value instanceof AbortSignal)) {
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+  }
+  return value;
 };
 
 const encodeTextInput = (
@@ -568,8 +1074,8 @@ export const normalizeNodeDiscordInteraction = (value: unknown): DiscordInteract
   }
 };
 
-const NODE_DISCORD_PROVIDER_EXTENSION_PROTOCOL = Symbol.for(
-  "@anto-project/discord-bot-core/provider-extension/v1",
+const NODE_DISCORD_PROVIDER_EXTENSION_PROTOCOL = Symbol(
+  "node-discord-provider-extension",
 );
 
 type NodeDiscordProviderExtensionProtocol = Readonly<{
@@ -589,6 +1095,12 @@ type RegisteredNodeDiscordProviderExtension = {
 
 export interface NodeDiscordProviderExtensionHostPort {
   registerProviderExtension(extension: unknown): Promise<() => Promise<void>>;
+}
+
+export interface NodeDiscordProviderExtensionOptions {
+  readonly key: string;
+  bindProviderClient(providerClient: unknown, generation: number): void;
+  releaseProviderClient(generation: number, signal: AbortSignal): Promise<void>;
 }
 
 const providerExtensionProtocol = (
@@ -655,8 +1167,64 @@ const providerExtensionProtocol = (
   });
 };
 
+/**
+ * Creates the opaque bridge understood by the Node runtime. The private Symbol
+ * and protocol shape remain owned here; companion packages expose ordinary
+ * callbacks and do not need to duplicate this implementation detail.
+ */
+export const createNodeDiscordProviderExtension = (
+  options: NodeDiscordProviderExtensionOptions,
+): unknown => {
+  if (options === null || typeof options !== "object") {
+    throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extension is invalid.", false);
+  }
+  const keyDescriptor = Object.getOwnPropertyDescriptor(options, "key");
+  const bindDescriptor = Object.getOwnPropertyDescriptor(options, "bindProviderClient");
+  const releaseDescriptor = Object.getOwnPropertyDescriptor(options, "releaseProviderClient");
+  if (
+    keyDescriptor === undefined ||
+    !("value" in keyDescriptor) ||
+    typeof keyDescriptor.value !== "string" ||
+    !/^[a-z][a-z0-9.-]{2,127}$/u.test(keyDescriptor.value) ||
+    bindDescriptor === undefined ||
+    !("value" in bindDescriptor) ||
+    typeof bindDescriptor.value !== "function" ||
+    releaseDescriptor === undefined ||
+    !("value" in releaseDescriptor) ||
+    typeof releaseDescriptor.value !== "function"
+  ) {
+    throw new DiscordCoreError(
+      "DISCORD_INVALID_INPUT",
+      "Discord provider extension callbacks are invalid.",
+      false,
+    );
+  }
+  const key = keyDescriptor.value;
+  const bind = bindDescriptor.value as NodeDiscordProviderExtensionOptions["bindProviderClient"];
+  const release = releaseDescriptor.value as NodeDiscordProviderExtensionOptions["releaseProviderClient"];
+  const protocol: NodeDiscordProviderExtensionProtocol = Object.freeze({
+    key,
+    bindProviderClient: (providerClient, generation) => bind(providerClient, generation),
+    releaseProviderClient: (generation, signal) => release(generation, signal),
+  });
+  const extension = Object.create(null) as Record<PropertyKey, unknown>;
+  Object.defineProperty(extension, NODE_DISCORD_PROVIDER_EXTENSION_PROTOCOL, {
+    value: protocol,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return Object.freeze(extension);
+};
+
 export class NodeDiscordGatewayAdapter
-  implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort
+  implements
+    DiscordGatewayRuntimePort,
+    NodeDiscordProviderExtensionHostPort,
+    DiscordGatewayInspectionPort,
+    DiscordGuildDirectoryPort,
+    DiscordProfileQueryPort,
+    DiscordPresencePort
 {
   #client: Client;
   readonly #clientFactory: () => Client;
@@ -666,8 +1234,12 @@ export class NodeDiscordGatewayAdapter
   readonly #startupTimeoutMs: number;
   readonly #shutdownTimeoutMs: number;
   readonly #listenerTimeoutMs: number;
+  readonly #queryTimeoutMs: number;
+  readonly #maximumConcurrentQueries: number;
   readonly #providerExtensions = new Map<string, RegisteredNodeDiscordProviderExtension>();
+  readonly #inFlightQueries = new Map<number, number>();
   #clientGeneration = 1;
+  #queryAbortController = new AbortController();
   #extensionsFrozen = false;
   #startPromise: Promise<DiscordGatewayIdentity> | null = null;
   #providerLoginPromise: Promise<void> | null = null;
@@ -719,6 +1291,20 @@ export class NodeDiscordGatewayAdapter
       30_000,
       "listenerTimeoutMs",
     );
+    this.#queryTimeoutMs = boundedInteger(
+      options.queryTimeoutMs,
+      10_000,
+      100,
+      30_000,
+      "queryTimeoutMs",
+    );
+    this.#maximumConcurrentQueries = boundedInteger(
+      options.maximumConcurrentQueries,
+      64,
+      1,
+      256,
+      "maximumConcurrentQueries",
+    );
     this.#attachClient(this.#client);
   }
 
@@ -758,6 +1344,7 @@ export class NodeDiscordGatewayAdapter
     const client = this.#clientFactory();
     this.#client = client;
     this.#clientGeneration += 1;
+    this.#queryAbortController = new AbortController();
     this.#attachClient(client);
     try {
       this.#bindProviderExtensions(client, this.#clientGeneration);
@@ -784,25 +1371,8 @@ export class NodeDiscordGatewayAdapter
 
     let shared = this.#startPromise;
     if (shared === null) {
-      if (this.#providerLoginPromise !== null) {
-        throw new DiscordCoreError(
-          "DISCORD_CIRCUIT_OPEN",
-          "A previous Discord gateway login has not settled.",
-          true,
-        );
-      }
-      /*
-       * Provider clients are generation-scoped: discord.js Client.destroy()
-       * permanently tears down that instance. Restart therefore creates a
-       * fresh internal client while preserving the stable product-facing port.
-       */
-      if (this.#stopRequested) {
-        await this.#replaceStoppedClient();
-        this.#stopRequested = false;
-      }
-      this.#assertProviderExtensionsReady();
       const controller = new AbortController();
-      const pending = this.#startOnce(controller.signal);
+      const pending = this.#startSharedGeneration(controller.signal);
       shared = pending;
       this.#startupController = controller;
       this.#startPromise = pending;
@@ -814,6 +1384,38 @@ export class NodeDiscordGatewayAdapter
     return this.#awaitStartupForCaller(shared, signal);
   }
 
+  async #startSharedGeneration(signal: AbortSignal): Promise<DiscordGatewayIdentity> {
+    if (this.#providerLoginPromise !== null) {
+      throw new DiscordCoreError(
+        "DISCORD_CIRCUIT_OPEN",
+        "A previous Discord gateway login has not settled.",
+        true,
+      );
+    }
+    /*
+     * Provider clients are generation-scoped: discord.js Client.destroy()
+     * permanently tears down that instance. Restart therefore creates a
+     * fresh internal client while preserving the stable product-facing port.
+     * This entire transition belongs to the published shared start promise,
+     * so concurrent starts cannot create competing client generations.
+     */
+    if (this.#stopRequested) {
+      await this.#replaceStoppedClient();
+      if (signal.aborted) {
+        throw new DiscordCoreError(
+          "DISCORD_CANCELLED",
+          "Discord gateway startup was cancelled.",
+          false,
+        );
+      }
+      this.#assertProviderExtensionsReady();
+      this.#stopRequested = false;
+    } else {
+      this.#assertProviderExtensionsReady();
+    }
+    return this.#startOnce(signal);
+  }
+
   public async stop(): Promise<void> {
     if (this.#stopPromise !== null) return this.#stopPromise;
 
@@ -821,6 +1423,8 @@ export class NodeDiscordGatewayAdapter
     const startup = this.#startPromise;
     const providerLogin = this.#providerLoginPromise;
     this.#stopRequested = true;
+    this.#queryAbortController.abort();
+    this.#inFlightQueries.delete(this.#clientGeneration);
     this.#startupController?.abort();
     const stopping = (async (): Promise<void> => {
       if (startup !== null) {
@@ -1045,6 +1649,494 @@ export class NodeDiscordGatewayAdapter
     return () => this.#interactionListeners.delete(listener);
   }
 
+  public capture(): DiscordGatewayInspectionSnapshot {
+    const client = this.#client;
+    const connected = !this.#stopRequested && client.isReady();
+    if (!connected) {
+      return Object.freeze({
+        connected: false,
+        applicationId: null,
+        agentUserId: null,
+        communityCount: 0,
+        userCount: 0,
+        partitionCount: 0,
+        transportLatencyMilliseconds: null,
+        gatewayLibraryVersion: discordJsVersion,
+        channelCount: 0,
+        textChannelCount: 0,
+        voiceChannelCount: 0,
+        guilds: Object.freeze([]),
+      });
+    }
+    if (client.guilds.cache.size > MAXIMUM_CACHED_GUILDS) {
+      throw new DiscordCoreError(
+        "DISCORD_RESPONSE_TOO_LARGE",
+        "Discord guild inventory exceeds its limit.",
+        false,
+      );
+    }
+    const guilds: DiscordGuildInventoryEntry[] = [];
+    const ids = new Set<string>();
+    let userCount = 0;
+    let channelCount = 0;
+    let textChannelCount = 0;
+    let voiceChannelCount = 0;
+    for (const [cacheId, guild] of client.guilds.cache) {
+      const entry = inventoryEntry(guild);
+      if (cacheId !== entry.id || ids.has(entry.id)) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord guild inventory is inconsistent.",
+          false,
+        );
+      }
+      ids.add(entry.id);
+      guilds.push(entry);
+      userCount += entry.memberCount;
+      channelCount += guild.channels.cache.size;
+      for (const channel of guild.channels.cache.values()) {
+        if (TEXT_CHANNEL_TYPES.has(channel.type)) textChannelCount += 1;
+        if (VOICE_CHANNEL_TYPES.has(channel.type)) voiceChannelCount += 1;
+      }
+      for (const [value, label] of [
+        [userCount, "Discord aggregate member count"],
+        [channelCount, "Discord aggregate channel count"],
+        [textChannelCount, "Discord aggregate text channel count"],
+        [voiceChannelCount, "Discord aggregate voice channel count"],
+      ] as const) {
+        responseBoundedInteger(value, 0, MAXIMUM_GUILD_MEMBERS, label);
+      }
+    }
+    guilds.sort((left, right) => left.id.localeCompare(right.id, "en"));
+    const user = client.user;
+    const application = client.application;
+    const latency = client.ws.ping;
+    return Object.freeze({
+      connected: true,
+      applicationId:
+        application === null
+          ? null
+          : responseSnowflake(application.id, "Discord application id"),
+      agentUserId:
+        user === null ? null : responseSnowflake(user.id, "Discord bot user id"),
+      communityCount: guilds.length,
+      userCount,
+      partitionCount: responseBoundedInteger(
+        client.ws.shards.size,
+        0,
+        4_096,
+        "Discord shard count",
+      ),
+      transportLatencyMilliseconds:
+        Number.isFinite(latency) && latency >= 0 && latency <= 1_000_000
+          ? latency
+          : null,
+      gatewayLibraryVersion: responseTextValue(
+        discordJsVersion,
+        1,
+        64,
+        "Discord gateway library version",
+      ),
+      channelCount,
+      textChannelCount,
+      voiceChannelCount,
+      guilds: Object.freeze(guilds),
+    });
+  }
+
+  public async listRoles(
+    input: DiscordGuildRoleListInput,
+  ): Promise<readonly DiscordGuildRoleSnapshot[]> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord guild role-list input"),
+      "Discord guild id",
+    );
+    const signal = inputAbortSignal(
+      inputDataProperty(input, "signal", "Discord guild role-list signal", true),
+      "Discord guild role-list signal",
+    );
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
+      if (guild.id !== guildId) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord guild response does not match the requested guild.",
+          false,
+        );
+      }
+      const collection = await guild.roles.fetch();
+      if (collection.size > MAXIMUM_GUILD_ROLES) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_TOO_LARGE",
+          "Discord guild role collection exceeds its limit.",
+          false,
+        );
+      }
+      const roles: DiscordGuildRoleSnapshot[] = [];
+      const ids = new Set<string>();
+      for (const [collectionId, role] of collection) {
+        const snapshot = roleSnapshot(role, guildId);
+        if (collectionId !== snapshot.id || ids.has(snapshot.id)) {
+          throw new DiscordCoreError(
+            "DISCORD_RESPONSE_INVALID",
+            "Discord guild role collection is inconsistent.",
+            false,
+          );
+        }
+        ids.add(snapshot.id);
+        roles.push(snapshot);
+      }
+      roles.sort((left, right) => left.id.localeCompare(right.id, "en"));
+      return Object.freeze(roles);
+    });
+  }
+
+  public async listMembers(input: DiscordGuildMemberListInput): Promise<DiscordGuildMemberPage> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord guild member-list input"),
+      "Discord guild id",
+    );
+    const limit = inputPageLimit(
+      inputDataProperty(input, "limit", "Discord guild member-list input"),
+    );
+    const afterValue = inputDataProperty(
+      input,
+      "after",
+      "Discord guild member-list cursor",
+      true,
+    );
+    const after = afterValue === undefined
+      ? null
+      : inputSnowflake(afterValue, "Discord member page cursor");
+    const signal = inputAbortSignal(
+      inputDataProperty(input, "signal", "Discord guild member-list signal", true),
+      "Discord guild member-list signal",
+    );
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
+      if (guild.id !== guildId) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord guild response does not match the requested guild.",
+          false,
+        );
+      }
+      const collection = await guild.members.list({
+        limit,
+        ...(after === null ? {} : { after }),
+        cache: false,
+      });
+      if (collection.size > limit || collection.size > MAXIMUM_MEMBER_PAGE_SIZE) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_TOO_LARGE",
+          "Discord guild member page exceeds its requested limit.",
+          false,
+        );
+      }
+      const members: DiscordGuildMemberSnapshot[] = [];
+      let previous: string | null = after;
+      const ids = new Set<string>();
+      for (const [collectionId, providerMember] of collection) {
+        const member = memberSnapshot(providerMember, guildId);
+        if (
+          collectionId !== member.userId ||
+          ids.has(member.userId) ||
+          (previous !== null && BigInt(member.userId) <= BigInt(previous))
+        ) {
+          throw new DiscordCoreError(
+            "DISCORD_RESPONSE_INVALID",
+            "Discord guild member page is not a strictly advancing sequence.",
+            false,
+          );
+        }
+        ids.add(member.userId);
+        previous = member.userId;
+        members.push(member);
+      }
+      const nextAfter = members.length === limit ? (members.at(-1)?.userId ?? null) : null;
+      if (nextAfter !== null && nextAfter === after) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord guild member page cursor did not advance.",
+          false,
+        );
+      }
+      return Object.freeze({
+        guildId,
+        limit,
+        after,
+        members: Object.freeze(members),
+        nextAfter,
+      });
+    });
+  }
+
+  public async readUser(input: DiscordUserProfileReadInput): Promise<DiscordUserProfile | null> {
+    const userId = inputSnowflake(
+      inputDataProperty(input, "userId", "Discord user-profile input"),
+      "Discord user id",
+    );
+    const mode = profileReadMode(
+      inputDataProperty(input, "mode", "Discord user-profile mode", true),
+    );
+    const signal = inputAbortSignal(
+      inputDataProperty(input, "signal", "Discord user-profile signal", true),
+      "Discord user-profile signal",
+    );
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      try {
+        const cached = client.users.cache.get(userId);
+        if (mode === "cache") return cached === undefined ? null : userProfile(cached);
+        const user =
+          mode === "cache_or_fetch" && cached !== undefined
+            ? cached
+            : await client.users.fetch(userId, { cache: true, force: mode === "provider" });
+        return userProfile(user);
+      } catch (error: unknown) {
+        if (isProviderNotFoundError(error)) return null;
+        throw error;
+      }
+    });
+  }
+
+  public async readMember(
+    input: DiscordMemberProfileReadInput,
+  ): Promise<DiscordMemberProfile | null> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord member-profile input"),
+      "Discord guild id",
+    );
+    const userId = inputSnowflake(
+      inputDataProperty(input, "userId", "Discord member-profile input"),
+      "Discord member user id",
+    );
+    const mode = profileReadMode(
+      inputDataProperty(input, "mode", "Discord member-profile mode", true),
+    );
+    const signal = inputAbortSignal(
+      inputDataProperty(input, "signal", "Discord member-profile signal", true),
+      "Discord member-profile signal",
+    );
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      try {
+        const cachedGuild = client.guilds.cache.get(guildId);
+        const cachedMember = cachedGuild?.members.cache.get(userId);
+        if (mode === "cache") {
+          return cachedMember === undefined ? null : memberProfile(cachedMember, guildId);
+        }
+        if (mode === "cache_or_fetch" && cachedMember !== undefined) {
+          return memberProfile(cachedMember, guildId);
+        }
+        const guild = cachedGuild ?? await client.guilds.fetch(guildId);
+        if (guild.id !== guildId) {
+          throw new DiscordCoreError(
+            "DISCORD_RESPONSE_INVALID",
+            "Discord guild response does not match the requested guild.",
+            false,
+          );
+        }
+        const member = await guild.members.fetch({
+          user: userId,
+          cache: true,
+          force: mode === "provider",
+        });
+        return memberProfile(member, guildId);
+      } catch (error: unknown) {
+        if (isProviderNotFoundError(error)) return null;
+        throw error;
+      }
+    });
+  }
+
+  public async readGuild(input: DiscordGuildProfileReadInput): Promise<DiscordGuildProfile | null> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord guild-profile input"),
+      "Discord guild id",
+    );
+    const mode = profileReadMode(
+      inputDataProperty(input, "mode", "Discord guild-profile mode", true),
+    );
+    const signal = inputAbortSignal(
+      inputDataProperty(input, "signal", "Discord guild-profile signal", true),
+      "Discord guild-profile signal",
+    );
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      try {
+        const cached = client.guilds.cache.get(guildId);
+        if (mode === "cache") return cached === undefined ? null : guildProfile(cached);
+        const guild =
+          mode === "cache_or_fetch" && cached !== undefined
+            ? cached
+            : await client.guilds.fetch({
+                guild: guildId,
+                cache: true,
+                force: mode === "provider",
+                withCounts: true,
+              });
+        if (guild.id !== guildId) {
+          throw new DiscordCoreError(
+            "DISCORD_RESPONSE_INVALID",
+            "Discord guild response does not match the requested guild.",
+            false,
+          );
+        }
+        return guildProfile(guild);
+      } catch (error: unknown) {
+        if (isProviderNotFoundError(error)) return null;
+        throw error;
+      }
+    });
+  }
+
+  public async apply(plan: DiscordPresencePlan): Promise<void> {
+    const textValue = inputDataProperty(plan, "text", "Discord presence plan");
+    if (typeof textValue !== "string") {
+      throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord presence text is invalid.", false);
+    }
+    const text = textValue.trim();
+    if (
+      text.length === 0 ||
+      [...text].length > 128 ||
+      /[\u0000-\u001f\u007f]/u.test(text)
+    ) {
+      throw new DiscordCoreError(
+        "DISCORD_INVALID_INPUT",
+        "Discord presence text must contain between 1 and 128 characters.",
+        false,
+      );
+    }
+    const activityValue = inputDataProperty(plan, "activityType", "Discord presence plan");
+    const statusValue = inputDataProperty(plan, "status", "Discord presence plan");
+    if (
+      typeof activityValue !== "string" ||
+      !Object.prototype.hasOwnProperty.call(PRESENCE_ACTIVITY_TYPES, activityValue) ||
+      typeof statusValue !== "string" ||
+      !PRESENCE_STATUSES.has(statusValue as DiscordPresenceStatus)
+    ) {
+      throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord presence is invalid.", false);
+    }
+    const activityType = activityValue as DiscordPresenceActivityType;
+    const status = statusValue as DiscordPresenceStatus;
+    const signal = inputAbortSignal(
+      inputDataProperty(plan, "signal", "Discord presence signal", true),
+      "Discord presence signal",
+    );
+    await this.#runCurrentClientOperation(signal, (client) => {
+      const user = client.user;
+      if (user === null) {
+        throw new DiscordCoreError(
+          "DISCORD_CIRCUIT_OPEN",
+          "Discord presence is unavailable before gateway readiness.",
+          true,
+        );
+      }
+      user.setPresence({
+        status,
+        activities: [{ name: text, type: PRESENCE_ACTIVITY_TYPES[activityType] }],
+      });
+    });
+  }
+
+  public async clear(signal?: AbortSignal): Promise<void> {
+    const validatedSignal = inputAbortSignal(signal, "Discord presence signal");
+    await this.#runCurrentClientOperation(validatedSignal, (client) => {
+      const user = client.user;
+      if (user === null) {
+        throw new DiscordCoreError(
+          "DISCORD_CIRCUIT_OPEN",
+          "Discord presence is unavailable before gateway readiness.",
+          true,
+        );
+      }
+      user.setPresence({ activities: [] });
+    });
+  }
+
+  async #runCurrentClientOperation<T>(
+    signal: AbortSignal | undefined,
+    operation: (client: Client) => T | Promise<T>,
+  ): Promise<T> {
+    if (signal?.aborted === true) {
+      throw new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false);
+    }
+    const client = this.#client;
+    const generation = this.#clientGeneration;
+    const lifecycleSignal = this.#queryAbortController.signal;
+    if (this.#stopRequested || lifecycleSignal.aborted || !client.isReady()) {
+      throw new DiscordCoreError(
+        "DISCORD_CIRCUIT_OPEN",
+        "Discord gateway is not ready for this operation.",
+        true,
+      );
+    }
+    const currentCount = this.#inFlightQueries.get(generation) ?? 0;
+    if (currentCount >= this.#maximumConcurrentQueries) {
+      throw new DiscordCoreError(
+        "DISCORD_CIRCUIT_OPEN",
+        "Discord concurrent query capacity was exceeded.",
+        true,
+      );
+    }
+    this.#inFlightQueries.set(generation, currentCount + 1);
+    const providerOperation = Promise.resolve()
+      .then(() => operation(client))
+      .finally(() => {
+        const count = this.#inFlightQueries.get(generation);
+        if (count === undefined) return;
+        if (count <= 1) this.#inFlightQueries.delete(generation);
+        else this.#inFlightQueries.set(generation, count - 1);
+      });
+
+    let rejectBoundary!: (error: DiscordCoreError) => void;
+    const boundary = new Promise<never>((_resolve, reject) => {
+      rejectBoundary = reject;
+    });
+    const onCallerAbort = (): void =>
+      rejectBoundary(new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false));
+    const onLifecycleAbort = (): void =>
+      rejectBoundary(new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway generation stopped.", false));
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+    lifecycleSignal.addEventListener("abort", onLifecycleAbort, { once: true });
+    const timeout = setTimeout(
+      () =>
+        rejectBoundary(
+          new DiscordCoreError(
+            "DISCORD_TIMEOUT",
+            "Discord operation exceeded its deadline.",
+            true,
+          ),
+        ),
+      this.#queryTimeoutMs,
+    );
+    try {
+      const result = await Promise.race([providerOperation, boundary]);
+      if (
+        this.#client !== client ||
+        this.#clientGeneration !== generation ||
+        this.#stopRequested ||
+        lifecycleSignal.aborted ||
+        !client.isReady()
+      ) {
+        throw new DiscordCoreError(
+          "DISCORD_CANCELLED",
+          "Discord gateway generation changed during the operation.",
+          false,
+        );
+      }
+      return result;
+    } catch (error: unknown) {
+      if (error instanceof DiscordCoreError) throw error;
+      if (isAbortRequested(signal) || isAbortRequested(lifecycleSignal)) {
+        throw new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false);
+      }
+      throw providerFailure(error);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onCallerAbort);
+      lifecycleSignal.removeEventListener("abort", onLifecycleAbort);
+    }
+  }
+
   public registerProviderExtension(
     extension: unknown,
   ): Promise<() => Promise<void>> {
@@ -1175,7 +2267,15 @@ export class NodeDiscordGatewayAdapter
   ): void {
     registered.boundGeneration = generation;
     try {
-      registered.protocol.bindProviderClient(client, generation);
+      const result = registered.protocol.bindProviderClient(client, generation) as unknown;
+      if (result !== undefined) {
+        void Promise.resolve(result).catch(() => undefined);
+        throw new DiscordCoreError(
+          "DISCORD_INVALID_INPUT",
+          "Discord provider extension bind callbacks must complete synchronously.",
+          false,
+        );
+      }
     } catch (error: unknown) {
       throw error instanceof DiscordCoreError
         ? error
@@ -1668,6 +2768,10 @@ export interface NodeDiscordRuntimeOptions {
 export type NodeDiscordRuntimeServices = Readonly<{
   gateway: DiscordGatewayRuntimePort;
   extensions: NodeDiscordProviderExtensionHostPort;
+  inspection: DiscordGatewayInspectionPort;
+  guilds: DiscordGuildDirectoryPort;
+  profiles: DiscordProfileQueryPort;
+  presence: DiscordPresencePort;
   commands: DiscordApplicationCommandsRestPort;
   messages: DiscordMessageDeliveryPort;
 }>;
@@ -1687,5 +2791,14 @@ export const createNodeDiscordRuntime = (
     ...(options.rest ?? {}),
     botToken: options.botToken,
   });
-  return Object.freeze({ gateway, extensions: gateway, commands: rest, messages: rest });
+  return Object.freeze({
+    gateway,
+    extensions: gateway,
+    inspection: gateway,
+    guilds: gateway,
+    profiles: gateway,
+    presence: gateway,
+    commands: rest,
+    messages: rest,
+  });
 };

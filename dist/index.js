@@ -7,10 +7,14 @@ export * from "./delivery.js";
 export * from "./errors.js";
 export * from "./events.js";
 export * from "./gateway.js";
+export * from "./guild-directory.js";
 export * from "./identifiers.js";
+export * from "./inspection.js";
 export * from "./interactions.js";
 export * from "./markdown.js";
 export * from "./payload.js";
+export * from "./presence.js";
+export * from "./profiles.js";
 export * from "./retry.js";
 export * from "./router.js";
 //# sourceMappingURL=index.js.map
