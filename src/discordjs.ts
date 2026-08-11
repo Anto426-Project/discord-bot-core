@@ -4787,6 +4787,7 @@ export class NodeDiscordGatewayAdapter
       if (timeout !== undefined) clearTimeout(timeout);
       if (timedOut) {
         this.#respondToOverloadedInteraction(interaction, client, generation);
+        const wasHealthy = this.#quarantinedInteractionDeliveryCounts.size === 0;
         const previousCount = this.#quarantinedInteractionDeliveryCounts.get(listener) ?? 0;
         this.#quarantinedInteractionDeliveryCounts.set(listener, previousCount + 1);
         void delivery.finally(() => {
@@ -4796,9 +4797,11 @@ export class NodeDiscordGatewayAdapter
             return;
           }
           this.#quarantinedInteractionDeliveryCounts.delete(listener);
-          this.#announceRuntimeRecovery("DISCORD_INTERACTION_ROUTER_QUARANTINED");
+          if (this.#quarantinedInteractionDeliveryCounts.size === 0) {
+            this.#announceRuntimeRecovery("DISCORD_INTERACTION_ROUTER_QUARANTINED");
+          }
         });
-        if (previousCount === 0) {
+        if (wasHealthy) {
           await this.#emit({
             type: "runtime_degraded",
             code: "DISCORD_INTERACTION_ROUTER_QUARANTINED",
