@@ -75,7 +75,12 @@ try {
         runtime.inspection !== runtime.gateway ||
         runtime.guilds !== runtime.gateway ||
         runtime.profiles !== runtime.gateway ||
-        runtime.presence !== runtime.gateway
+        runtime.presence !== runtime.gateway ||
+        runtime.events !== runtime.gateway ||
+        runtime.moderation !== runtime.gateway ||
+        runtime.botAutoMod !== runtime.gateway ||
+        runtime.nativeAutoMod !== runtime.gateway ||
+        runtime.voiceRooms !== runtime.gateway
       ) {
         throw new Error("runtime service composition failed");
       }

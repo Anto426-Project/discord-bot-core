@@ -4,6 +4,7 @@ export type DiscordGatewayIdentity = Readonly<{
     username: string;
     applicationId: string;
 }>;
+export type DiscordGatewayRuntimeCondition = "DISCORD_GATEWAY_EVENT_BACKLOG_EXHAUSTED" | "DISCORD_GATEWAY_EVENT_LISTENER_QUARANTINED" | "DISCORD_INTERACTION_CAPACITY_EXHAUSTED" | "DISCORD_INTERACTION_ROUTER_QUARANTINED";
 export type DiscordGatewayLifecycleEvent = Readonly<{
     type: "ready";
     identity: DiscordGatewayIdentity;
@@ -20,6 +21,12 @@ export type DiscordGatewayLifecycleEvent = Readonly<{
 }> | Readonly<{
     type: "provider_error";
     code: "DISCORD_GATEWAY_ERROR";
+}> | Readonly<{
+    type: "runtime_degraded";
+    code: DiscordGatewayRuntimeCondition;
+}> | Readonly<{
+    type: "runtime_recovered";
+    code: DiscordGatewayRuntimeCondition;
 }>;
 export type DiscordGatewayLifecycleListener = (event: DiscordGatewayLifecycleEvent) => void | Promise<void>;
 /**

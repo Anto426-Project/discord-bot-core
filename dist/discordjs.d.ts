@@ -1,12 +1,16 @@
+import type { DiscordAutoModOperationReceipt, DiscordBotAutoModDeleteMessageInput, DiscordBotAutoModPort, DiscordBotAutoModTimeoutMemberInput, DiscordNativeAutoModCreateInput, DiscordNativeAutoModDeleteInput, DiscordNativeAutoModListInput, DiscordNativeAutoModMutationReceipt, DiscordNativeAutoModPort, DiscordNativeAutoModReadInput, DiscordNativeAutoModRuleSnapshot, DiscordNativeAutoModUpdateInput } from "./automod.js";
 import type { DiscordApplicationCommandBody } from "./command-model.js";
 import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublicationScope, type DiscordRemoteApplicationCommand } from "./command-publisher.js";
+import type { DiscordGatewayEventListener, DiscordGatewayEventPort } from "./gateway-events.js";
 import type { DiscordChannelMessageDelivery, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordMessageDeliveryPort } from "./delivery.js";
 import type { DiscordGatewayIdentity, DiscordGatewayLifecycleListener, DiscordGatewayRuntimePort } from "./gateway.js";
 import type { DiscordGuildDirectoryPort, DiscordGuildMemberListInput, DiscordGuildMemberPage, DiscordGuildRoleListInput, DiscordGuildRoleSnapshot } from "./guild-directory.js";
 import type { DiscordGatewayInspectionPort, DiscordGatewayInspectionSnapshot } from "./inspection.js";
 import type { DiscordInteraction, DiscordInteractionListener } from "./interactions.js";
+import type { DiscordBanMemberInput, DiscordDeleteRecentMessagesInput, DiscordKickMemberInput, DiscordMemberModerationReceipt, DiscordMessageCleanupReceipt, DiscordModerationActorFacts, DiscordModerationActorFactsInput, DiscordModerationChannelFactsInput, DiscordModerationMemberFacts, DiscordModerationMemberFactsInput, DiscordModerationPort, DiscordUnbanMemberInput } from "./moderation.js";
 import type { DiscordPresencePlan, DiscordPresencePort } from "./presence.js";
 import type { DiscordGuildProfile, DiscordGuildProfileReadInput, DiscordMemberProfile, DiscordMemberProfileReadInput, DiscordProfileQueryPort, DiscordUserProfile, DiscordUserProfileReadInput } from "./profiles.js";
+import type { DiscordVoiceRoomCreateInput, DiscordVoiceRoomDeleteInput, DiscordVoiceRoomDeleteOverwriteInput, DiscordVoiceRoomMoveMemberInput, DiscordVoiceRoomOperationReceipt, DiscordVoiceRoomPort, DiscordVoiceRoomUpdateInput, DiscordVoiceRoomUpsertOverwriteInput } from "./voice-rooms.js";
 export type DiscordPrivilegedGatewayIntent = "GuildMembers" | "GuildPresences" | "MessageContent";
 export declare const DISCORD_GATEWAY_INTENTS: readonly ["Guilds", "GuildMembers", "GuildModeration", "GuildExpressions", "GuildIntegrations", "GuildWebhooks", "GuildInvites", "GuildVoiceStates", "GuildPresences", "GuildMessages", "GuildMessageReactions", "GuildMessageTyping", "DirectMessages", "DirectMessageReactions", "DirectMessageTyping", "MessageContent", "GuildScheduledEvents", "AutoModerationConfiguration", "AutoModerationExecution", "GuildMessagePolls", "DirectMessagePolls"];
 export type DiscordGatewayIntent = (typeof DISCORD_GATEWAY_INTENTS)[number];
@@ -20,8 +24,20 @@ export interface NodeDiscordGatewayOptions {
     readonly waitGuildTimeoutMs?: number;
     readonly startupTimeoutMs?: number;
     readonly listenerTimeoutMs?: number;
+    readonly interactionTimeoutMs?: number;
     readonly queryTimeoutMs?: number;
     readonly maximumConcurrentQueries?: number;
+    readonly maximumConcurrentInteractions?: number;
+    readonly interactionOverloadContent?: string;
+    readonly maximumGatewayEventListeners?: number;
+    readonly maximumGatewayEventBacklog?: number;
+}
+export interface NodeDiscordRestOptions {
+    readonly botToken: string;
+    readonly timeoutMs?: number;
+    readonly retries?: number;
+    readonly globalRequestsPerSecond?: number;
+    readonly invalidRequestWarningInterval?: number;
 }
 /**
  * Converts a provider-owned Node interaction into the stable core DTO.
@@ -46,7 +62,7 @@ export interface NodeDiscordProviderExtensionOptions {
  * callbacks and do not need to duplicate this implementation detail.
  */
 export declare const createNodeDiscordProviderExtension: (options: NodeDiscordProviderExtensionOptions) => unknown;
-export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort, DiscordGatewayInspectionPort, DiscordGuildDirectoryPort, DiscordProfileQueryPort, DiscordPresencePort {
+export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort, DiscordGatewayInspectionPort, DiscordGuildDirectoryPort, DiscordProfileQueryPort, DiscordPresencePort, DiscordGatewayEventPort, DiscordModerationPort, DiscordBotAutoModPort, DiscordNativeAutoModPort, DiscordVoiceRoomPort {
     #private;
     constructor(options: NodeDiscordGatewayOptions);
     start(signal?: AbortSignal): Promise<DiscordGatewayIdentity>;
@@ -54,6 +70,7 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     isReady(): boolean;
     subscribeLifecycle(listener: DiscordGatewayLifecycleListener): () => void;
     subscribeInteractions(listener: DiscordInteractionListener): () => void;
+    subscribe(listener: DiscordGatewayEventListener): () => void;
     capture(): DiscordGatewayInspectionSnapshot;
     listRoles(input: DiscordGuildRoleListInput): Promise<readonly DiscordGuildRoleSnapshot[]>;
     listMembers(input: DiscordGuildMemberListInput): Promise<DiscordGuildMemberPage>;
@@ -62,17 +79,30 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     readGuild(input: DiscordGuildProfileReadInput): Promise<DiscordGuildProfile | null>;
     apply(plan: DiscordPresencePlan): Promise<void>;
     clear(signal?: AbortSignal): Promise<void>;
+    readActorFacts(input: DiscordModerationActorFactsInput): Promise<DiscordModerationActorFacts>;
+    readChannelFacts(input: DiscordModerationChannelFactsInput): Promise<DiscordModerationActorFacts>;
+    readMemberFacts(input: DiscordModerationMemberFactsInput): Promise<DiscordModerationMemberFacts>;
+    deleteRecentMessages(input: DiscordDeleteRecentMessagesInput): Promise<DiscordMessageCleanupReceipt>;
+    kickMember(input: DiscordKickMemberInput): Promise<DiscordMemberModerationReceipt>;
+    banMember(input: DiscordBanMemberInput): Promise<DiscordMemberModerationReceipt>;
+    unbanMember(input: DiscordUnbanMemberInput): Promise<DiscordMemberModerationReceipt>;
+    deleteMessage(input: DiscordBotAutoModDeleteMessageInput): Promise<DiscordAutoModOperationReceipt>;
+    timeoutMember(input: DiscordBotAutoModTimeoutMemberInput): Promise<DiscordAutoModOperationReceipt>;
+    listRules(input: DiscordNativeAutoModListInput): Promise<readonly DiscordNativeAutoModRuleSnapshot[]>;
+    readRule(input: DiscordNativeAutoModReadInput): Promise<DiscordNativeAutoModRuleSnapshot | null>;
+    createRule(input: DiscordNativeAutoModCreateInput): Promise<DiscordNativeAutoModMutationReceipt>;
+    updateRule(input: DiscordNativeAutoModUpdateInput): Promise<DiscordNativeAutoModMutationReceipt>;
+    deleteRule(input: DiscordNativeAutoModDeleteInput): Promise<DiscordNativeAutoModMutationReceipt>;
+    createRoom(input: DiscordVoiceRoomCreateInput): Promise<DiscordVoiceRoomOperationReceipt>;
+    moveMember(input: DiscordVoiceRoomMoveMemberInput): Promise<DiscordVoiceRoomOperationReceipt>;
+    updateRoom(input: DiscordVoiceRoomUpdateInput): Promise<DiscordVoiceRoomOperationReceipt>;
+    upsertPermissionOverwrite(input: DiscordVoiceRoomUpsertOverwriteInput): Promise<DiscordVoiceRoomOperationReceipt>;
+    deletePermissionOverwrite(input: DiscordVoiceRoomDeleteOverwriteInput): Promise<DiscordVoiceRoomOperationReceipt>;
+    deleteRoom(input: DiscordVoiceRoomDeleteInput): Promise<DiscordVoiceRoomOperationReceipt>;
     registerProviderExtension(extension: unknown): Promise<() => Promise<void>>;
     toJSON(): Readonly<{
         component: "node-discord-gateway-adapter";
     }>;
-}
-export interface NodeDiscordRestOptions {
-    readonly botToken: string;
-    readonly timeoutMs?: number;
-    readonly retries?: number;
-    readonly globalRequestsPerSecond?: number;
-    readonly invalidRequestWarningInterval?: number;
 }
 /**
  * Safe facade over the provider REST SDK. The internal SDK owns shared/global
@@ -106,6 +136,11 @@ export type NodeDiscordRuntimeServices = Readonly<{
     guilds: DiscordGuildDirectoryPort;
     profiles: DiscordProfileQueryPort;
     presence: DiscordPresencePort;
+    events: DiscordGatewayEventPort;
+    moderation: DiscordModerationPort;
+    botAutoMod: DiscordBotAutoModPort;
+    nativeAutoMod: DiscordNativeAutoModPort;
+    voiceRooms: DiscordVoiceRoomPort;
     commands: DiscordApplicationCommandsRestPort;
     messages: DiscordMessageDeliveryPort;
 }>;

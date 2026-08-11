@@ -41,6 +41,27 @@ from an older client is rejected even if its SDK operation settles after a
 restart. Profile assets are fully materialized as primitive HTTPS CDN URLs;
 provider objects and lazy callbacks never cross the adapter boundary.
 
+Gateway events, moderation facts/effects, AutoMod CRUD and voice-room mutations
+use the same generation boundary. Event DTOs contain only bounded primitives;
+message text is replaced by a canonical SHA-256 fingerprint. These ports expose
+provider mechanics, never authorization or workflow: the owning bot decides
+which operation is allowed, supplies the audited operation identifier and
+coordinates persistence, notices, retries and reconciliation.
+
+The normalized event stream uses an ordered bounded backlog. Interactions use a
+separate bounded-concurrency lane so slow event consumers cannot consume the
+provider acknowledgement window; capacity exhaustion receives a bounded
+ephemeral overload response. Deadline-violating listeners are quarantined until
+their outstanding delivery settles, so one non-cooperative handler cannot
+multiply unresolved work. Degradation and recovery are both emitted through the
+lifecycle port. Gateway SDK operations, commands and messages also share the
+current generation's single REST coordinator and therefore one global
+rate-limit state. Provider mutations
+deliberately do not promise exactly-once semantics: after dispatch, cancellation
+or timeout produces an explicit unknown outcome. The product uses its durable
+operation identifier to reconcile before retrying; the core never invents an
+automatic retry that could duplicate a moderation, rule or channel mutation.
+
 The package is not a service. It has no service key, listener, database,
 runtime lease, diagnostics endpoint, environment reader or private key.
 Antobot and UniBot pin the package independently as a Git submodule and never

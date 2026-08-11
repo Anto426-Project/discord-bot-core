@@ -1,4 +1,5 @@
-import { ActivityType, BaseInteraction, ChannelType, Client, DiscordAPIError, Events, GatewayIntentBits, HTTPError, MessageFlags, Partials, PermissionFlagsBits, REST, RateLimitError, Routes, version as discordJsVersion, } from "discord.js";
+import { createHash } from "node:crypto";
+import { ActivityType, AutoModerationActionType, AutoModerationRuleEventType, AutoModerationRuleKeywordPresetType, AutoModerationRuleTriggerType, BaseInteraction, ChannelType, Client, DiscordAPIError, Events, GatewayIntentBits, HTTPError, MessageFlags, OverwriteType, Partials, PermissionFlagsBits, REST, RateLimitError, Routes, version as discordJsVersion, } from "discord.js";
 import { fingerprintDiscordChatInputCommand, } from "./command-publisher.js";
 import { discordModal, discordTextInput, } from "./components.js";
 import { DiscordCoreError } from "./errors.js";
@@ -65,6 +66,8 @@ const PARTIALS = Object.freeze({
     thread_member: Partials.ThreadMember,
     soundboard_sound: Partials.SoundboardSound,
 });
+const NODE_DISCORD_GATEWAY_REST_OPTIONS = Symbol("node-discord-gateway-rest-options");
+const NODE_DISCORD_REST_PROVIDER = Symbol("node-discord-rest-provider");
 const boundedInteger = (value, fallback, minimum, maximum, label) => {
     const resolved = value ?? fallback;
     if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum) {
@@ -73,6 +76,24 @@ const boundedInteger = (value, fallback, minimum, maximum, label) => {
     return resolved;
 };
 const isAbortRequested = (signal) => signal?.aborted === true;
+const validatedInteractionOverloadContent = (value) => {
+    const normalized = (value ?? "Service temporarily unavailable.").trim();
+    if (normalized.length < 1 ||
+        normalized.length > 400 ||
+        [...normalized].length > 200 ||
+        /[\u0000-\u001f\u007f]/u.test(normalized)) {
+        throw new RangeError("interactionOverloadContent must contain from 1 to 200 safe characters.");
+    }
+    return normalized;
+};
+const nodeDiscordRestSdkOptions = (options) => Object.freeze({
+    version: "10",
+    timeout: boundedInteger(options?.timeoutMs, 15_000, 100, 30_000, "timeoutMs"),
+    retries: boundedInteger(options?.retries, 3, 0, 5, "retries"),
+    globalRequestsPerSecond: boundedInteger(options?.globalRequestsPerSecond, 50, 1, 50, "globalRequestsPerSecond"),
+    invalidRequestWarningInterval: boundedInteger(options?.invalidRequestWarningInterval, 250, 0, 10_000, "invalidRequestWarningInterval"),
+    userAgentAppendix: "DiscordBot (https://github.com/Anto426-Project/discord-bot-core, 0.1.0)",
+});
 /**
  * Creates the private provider client with closed mention defaults. Privileged gateway
  * intents must be acknowledged individually by the owning product; the core
@@ -109,6 +130,7 @@ const createClient = (options) => {
         failIfNotExists: false,
         closeTimeout: boundedInteger(options.closeTimeoutMs, 5_000, 1_000, 30_000, "closeTimeoutMs"),
         waitGuildTimeout: boundedInteger(options.waitGuildTimeoutMs, 15_000, 1_000, 60_000, "waitGuildTimeoutMs"),
+        rest: nodeDiscordRestSdkOptions(options.rest),
         ...(partials === undefined ? {} : { partials: Object.freeze(partials) }),
     });
 };
@@ -472,6 +494,656 @@ const inputAbortSignal = (value, label) => {
     }
     return value;
 };
+const inputTextValue = (value, minimum, maximum, label) => {
+    if (typeof value !== "string" ||
+        value.length < minimum ||
+        value.length > maximum ||
+        /[\u0000-\u001f\u007f]/u.test(value)) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+    }
+    return value;
+};
+const inputInteger = (value, minimum, maximum, label) => {
+    if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+    }
+    return value;
+};
+const inputBoolean = (value, label) => {
+    if (typeof value !== "boolean") {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+    }
+    return value;
+};
+const inputDenseArray = (value, minimum, maximum, label) => {
+    if (!Array.isArray(value) ||
+        Object.getPrototypeOf(value) !== Array.prototype ||
+        value.length < minimum ||
+        value.length > maximum) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+    }
+    const result = [];
+    for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (descriptor === undefined || !("value" in descriptor)) {
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} is invalid.`, false);
+        }
+        result.push(descriptor.value);
+    }
+    return Object.freeze(result);
+};
+const inputSignalFrom = (input, label) => inputAbortSignal(inputDataProperty(input, "signal", `${label} signal`, true), `${label} signal`);
+const inputOperationId = (input, label) => inputTextValue(inputDataProperty(input, "operationId", label), 1, 256, label);
+const inputAuditReason = (input, label) => inputTextValue(inputDataProperty(input, "auditReason", label), 1, 512, label);
+const responseStringArray = (value, maximumItems, maximumLength, label, snowflakes = false) => {
+    if (!Array.isArray(value) || value.length > maximumItems) {
+        throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+    }
+    const result = [];
+    const unique = new Set();
+    for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (descriptor === undefined || !("value" in descriptor)) {
+            throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+        }
+        const item = snowflakes
+            ? responseSnowflake(descriptor.value, label)
+            : responseTextValue(descriptor.value, 0, maximumLength, label);
+        if (unique.has(item)) {
+            throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
+        }
+        unique.add(item);
+        result.push(item);
+    }
+    return Object.freeze(result);
+};
+const observedAt = () => new Date().toISOString();
+const guildGatewayEvent = (type, guild) => Object.freeze({
+    type,
+    guildId: responseSnowflake(guild.id, "Discord guild event id"),
+    name: responseTextValue(guild.name, 1, 100, "Discord guild event name"),
+    preferredLocale: responseTextValue(guild.preferredLocale, 2, 32, "Discord guild preferred locale"),
+    shardId: responseBoundedInteger(guild.shardId, 0, 4_095, "Discord guild shard id"),
+    joinedAt: responseNullableTimestamp(guild.joinedAt, "Discord guild join timestamp"),
+    observedAt: observedAt(),
+});
+const memberRoles = (member, expectedGuildId) => {
+    if (member.roles.cache.size > MAXIMUM_GUILD_ROLES) {
+        throw new DiscordCoreError("DISCORD_RESPONSE_TOO_LARGE", "Discord member role collection exceeds its limit.", false);
+    }
+    const roles = [...member.roles.cache.values()]
+        .map((role) => roleSnapshot(role, expectedGuildId))
+        .sort((left, right) => left.id.localeCompare(right.id, "en"));
+    return Object.freeze(roles);
+};
+const memberGatewayEvent = (type, member) => {
+    const guildId = responseSnowflake(member.guild.id, "Discord member event guild id");
+    const snapshot = memberSnapshot(member, guildId);
+    const roles = memberRoles(member, guildId);
+    if (roles.length !== snapshot.roleIds.length ||
+        roles.some((role, index) => role.id !== snapshot.roleIds[index])) {
+        throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord member event roles are inconsistent.", false);
+    }
+    return Object.freeze({
+        type,
+        guildId,
+        userId: snapshot.userId,
+        member: snapshot,
+        roles,
+        observedAt: observedAt(),
+    });
+};
+const removedMemberGatewayEvent = (member) => {
+    const guildId = responseSnowflake(member.guild.id, "Discord member event guild id");
+    const userId = responseSnowflake(member.id, "Discord member event user id");
+    try {
+        return memberGatewayEvent("guild_member_removed", member);
+    }
+    catch {
+        // Discord may emit a PartialGuildMember after cache loss. Removal still
+        // has a trustworthy guild/user identity, while the unavailable snapshot
+        // is made explicit instead of fabricating role or profile facts.
+        return Object.freeze({
+            type: "guild_member_removed",
+            guildId,
+            userId,
+            member: null,
+            roles: Object.freeze([]),
+            observedAt: observedAt(),
+        });
+    }
+};
+const voiceStateGatewayEvent = (previous, current) => {
+    const guildId = responseSnowflake(current.guild.id, "Discord voice-state guild id");
+    const previousGuildId = responseSnowflake(previous.guild.id, "Discord voice-state guild id");
+    const userId = responseSnowflake(current.id, "Discord voice-state user id");
+    if (previousGuildId !== guildId || previous.id !== userId) {
+        throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord voice-state transition is inconsistent.", false);
+    }
+    return Object.freeze({
+        type: "voice_state_changed",
+        guildId,
+        userId,
+        providerSessionId: responseNullableTextValue(current.sessionId ?? previous.sessionId, 256, "Discord voice-state session id"),
+        previousChannelId: previous.channelId === null
+            ? null
+            : responseSnowflake(previous.channelId, "Discord previous voice channel id"),
+        currentChannelId: current.channelId === null
+            ? null
+            : responseSnowflake(current.channelId, "Discord current voice channel id"),
+        observedAt: observedAt(),
+    });
+};
+const messageFingerprint = (content) => {
+    const canonical = content
+        .normalize("NFKC")
+        .trim()
+        .replace(/\s+/gu, " ")
+        .toLocaleLowerCase("en-US");
+    return canonical.length === 0
+        ? null
+        : createHash("sha256").update(canonical, "utf8").digest("hex");
+};
+const messageGatewayEvent = (message) => {
+    if (!message.inGuild())
+        return null;
+    const guildId = responseSnowflake(message.guildId, "Discord message guild id");
+    const member = message.member;
+    const roleIds = member === null ? Object.freeze([]) : memberRoleIds(member, guildId);
+    const moderationExempt = member?.permissions.has(PermissionFlagsBits.Administrator) === true ||
+        member?.permissions.has(PermissionFlagsBits.ManageMessages) === true ||
+        member?.permissions.has(PermissionFlagsBits.ModerateMembers) === true;
+    return Object.freeze({
+        type: "message_created",
+        messageId: responseSnowflake(message.id, "Discord message id"),
+        guildId,
+        channelId: responseSnowflake(message.channelId, "Discord message channel id"),
+        authorUserId: responseSnowflake(message.author.id, "Discord message author id"),
+        roleIds,
+        createdAt: responseTimestamp(message.createdAt, "Discord message creation timestamp"),
+        accountCreatedAt: responseTimestamp(message.author.createdAt, "Discord message author creation timestamp"),
+        automated: responseBoolean(message.author.bot || message.webhookId !== null, "Discord automated-author flag"),
+        moderationExempt,
+        contentFingerprint: messageFingerprint(message.content),
+    });
+};
+const gatewayNativeAutoModAction = (action) => {
+    switch (action) {
+        case AutoModerationActionType.BlockMessage:
+            return "block_message";
+        case AutoModerationActionType.SendAlertMessage:
+            return "send_alert";
+        case AutoModerationActionType.Timeout:
+            return "timeout";
+        case AutoModerationActionType.BlockMemberInteraction:
+            return "block_member_interaction";
+    }
+};
+const nativeAutoModGatewayEvent = (execution) => {
+    const guildId = responseSnowflake(execution.guild.id, "Discord AutoMod guild id");
+    const providerRuleId = responseSnowflake(execution.ruleId, "Discord AutoMod rule id");
+    const actorUserId = responseSnowflake(execution.userId, "Discord AutoMod actor id");
+    const channelId = execution.channelId === null
+        ? null
+        : responseSnowflake(execution.channelId, "Discord AutoMod channel id");
+    const messageId = execution.messageId === null
+        ? null
+        : responseSnowflake(execution.messageId, "Discord AutoMod message id");
+    const action = gatewayNativeAutoModAction(execution.action.type);
+    const eventId = [
+        guildId,
+        providerRuleId,
+        actorUserId,
+        channelId ?? "none",
+        messageId ?? "none",
+        action,
+    ].join(":");
+    return Object.freeze({
+        type: "native_automod_executed",
+        eventId,
+        guildId,
+        providerRuleId,
+        actorUserId,
+        channelId,
+        messageId,
+        action,
+        observedAt: observedAt(),
+    });
+};
+const MODERATION_PERMISSION_FLAGS = Object.freeze({
+    manage_messages: PermissionFlagsBits.ManageMessages,
+    kick_members: PermissionFlagsBits.KickMembers,
+    ban_members: PermissionFlagsBits.BanMembers,
+});
+const moderationPermission = (value, allowManageMessages) => {
+    if (value !== "kick_members" &&
+        value !== "ban_members" &&
+        (!allowManageMessages || value !== "manage_messages")) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord moderation permission is invalid.", false);
+    }
+    return value;
+};
+const resolveGuild = async (client, guildId) => {
+    const guild = client.guilds.cache.get(guildId) ?? await client.guilds.fetch(guildId);
+    if (guild.id !== guildId) {
+        throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord guild response does not match the requested guild.", false);
+    }
+    return guild;
+};
+const fetchMemberOrNull = async (guild, userId) => {
+    try {
+        const member = await guild.members.fetch({ user: userId, force: true, cache: true });
+        if (member.id !== userId || member.guild.id !== guild.id) {
+            throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord member response does not match the requested member.", false);
+        }
+        return member;
+    }
+    catch (error) {
+        if (isProviderNotFoundError(error))
+            return null;
+        throw error;
+    }
+};
+const moderationAgentUserId = (client) => {
+    if (client.user === null) {
+        throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "Discord moderation is unavailable before gateway readiness.", true);
+    }
+    return responseSnowflake(client.user.id, "Discord moderation agent id");
+};
+const isMemberAbove = (guild, member, target) => {
+    if (member === null || target === null)
+        return false;
+    if (member.id === guild.ownerId)
+        return true;
+    if (target.id === guild.ownerId || member.id === target.id)
+        return false;
+    return member.roles.highest.comparePositionTo(target.roles.highest) > 0;
+};
+const actorModerationFacts = async (client, guildId, actorUserId, requiredPermission) => {
+    const guild = await resolveGuild(client, guildId);
+    const agentUserId = moderationAgentUserId(client);
+    const [actor, agent] = await Promise.all([
+        fetchMemberOrNull(guild, actorUserId),
+        fetchMemberOrNull(guild, agentUserId),
+    ]);
+    const permission = MODERATION_PERMISSION_FLAGS[requiredPermission];
+    return Object.freeze({
+        guild,
+        actor,
+        agent,
+        facts: Object.freeze({
+            guildId,
+            actorUserId,
+            agentUserId,
+            requiredPermission,
+            actorPresent: actor !== null,
+            agentPresent: agent !== null,
+            actorHasRequiredPermission: actor?.permissions.has(permission) === true,
+            agentHasRequiredPermission: agent?.permissions.has(permission) === true,
+        }),
+    });
+};
+const memberModerationFacts = async (client, guildId, actorUserId, targetUserId, requiredPermission) => {
+    const state = await actorModerationFacts(client, guildId, actorUserId, requiredPermission);
+    const target = await fetchMemberOrNull(state.guild, targetUserId);
+    return Object.freeze({
+        ...state.facts,
+        targetUserId,
+        targetDisplayName: target === null
+            ? null
+            : responseTextValue(target.displayName, 1, 128, "Discord target display name"),
+        targetPresent: target !== null,
+        targetIsGuildOwner: targetUserId === state.guild.ownerId,
+        targetIsActor: targetUserId === actorUserId,
+        targetIsAgent: targetUserId === state.facts.agentUserId,
+        actorIsAboveTarget: isMemberAbove(state.guild, state.actor, target),
+        agentIsAboveTarget: isMemberAbove(state.guild, state.agent, target),
+    });
+};
+const inputStringArray = (value, minimumItems, maximumItems, maximumLength, label, snowflakes = false) => {
+    const source = inputDenseArray(value, minimumItems, maximumItems, label);
+    const result = [];
+    const unique = new Set();
+    for (const entry of source) {
+        const item = snowflakes
+            ? inputSnowflake(entry, label)
+            : inputTextValue(entry, 1, maximumLength, label);
+        if (unique.has(item)) {
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} has duplicates.`, false);
+        }
+        unique.add(item);
+        result.push(item);
+    }
+    return Object.freeze(result);
+};
+const NATIVE_AUTOMOD_PRESETS = Object.freeze({
+    profanity: AutoModerationRuleKeywordPresetType.Profanity,
+    sexual_content: AutoModerationRuleKeywordPresetType.SexualContent,
+    slurs: AutoModerationRuleKeywordPresetType.Slurs,
+});
+const nativeAutoModPreset = (value) => {
+    if (value !== "profanity" && value !== "sexual_content" && value !== "slurs") {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord AutoMod preset is invalid.", false);
+    }
+    return value;
+};
+const nativeAutoModTrigger = (value) => {
+    const type = inputDataProperty(value, "type", "Discord AutoMod trigger");
+    switch (type) {
+        case "keyword":
+        case "member_profile":
+            return Object.freeze({
+                type,
+                keywordFilter: inputStringArray(inputDataProperty(value, "keywordFilter", "Discord AutoMod keyword filter"), 0, 1_000, 60, "Discord AutoMod keyword filter"),
+                regexPatterns: inputStringArray(inputDataProperty(value, "regexPatterns", "Discord AutoMod regular expressions"), 0, 10, 260, "Discord AutoMod regular expressions"),
+                allowList: inputStringArray(inputDataProperty(value, "allowList", "Discord AutoMod allow list"), 0, 100, 60, "Discord AutoMod allow list"),
+            });
+        case "spam":
+            return Object.freeze({ type });
+        case "keyword_preset": {
+            const presets = inputDenseArray(inputDataProperty(value, "presets", "Discord AutoMod presets"), 1, 3, "Discord AutoMod presets").map(nativeAutoModPreset);
+            if (new Set(presets).size !== presets.length) {
+                throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord AutoMod presets have duplicates.", false);
+            }
+            return Object.freeze({
+                type,
+                presets: Object.freeze(presets),
+                allowList: inputStringArray(inputDataProperty(value, "allowList", "Discord AutoMod allow list"), 0, 100, 60, "Discord AutoMod allow list"),
+            });
+        }
+        case "mention_spam":
+            return Object.freeze({
+                type,
+                mentionTotalLimit: inputInteger(inputDataProperty(value, "mentionTotalLimit", "Discord AutoMod mention limit"), 1, 50, "Discord AutoMod mention limit"),
+                raidProtectionEnabled: inputBoolean(inputDataProperty(value, "raidProtectionEnabled", "Discord AutoMod raid protection"), "Discord AutoMod raid protection"),
+            });
+        default:
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord AutoMod trigger is invalid.", false);
+    }
+};
+const nativeAutoModAction = (value) => {
+    const type = inputDataProperty(value, "type", "Discord AutoMod action");
+    switch (type) {
+        case "block_message": {
+            const customMessage = inputDataProperty(value, "customMessage", "Discord AutoMod block-message custom message", true);
+            return Object.freeze({
+                type,
+                ...(customMessage === undefined
+                    ? {}
+                    : {
+                        customMessage: inputTextValue(customMessage, 1, 150, "Discord AutoMod block-message custom message"),
+                    }),
+            });
+        }
+        case "send_alert":
+            return Object.freeze({
+                type,
+                channelId: inputSnowflake(inputDataProperty(value, "channelId", "Discord AutoMod alert channel id"), "Discord AutoMod alert channel id"),
+            });
+        case "timeout":
+            return Object.freeze({
+                type,
+                durationSeconds: inputInteger(inputDataProperty(value, "durationSeconds", "Discord AutoMod timeout duration"), 1, 2_419_200, "Discord AutoMod timeout duration"),
+            });
+        case "block_member_interaction":
+            return Object.freeze({ type });
+        default:
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord AutoMod action is invalid.", false);
+    }
+};
+const nativeAutoModRulePlan = (value) => {
+    const eventType = inputDataProperty(value, "eventType", "Discord AutoMod event type");
+    if (eventType !== "message_send" && eventType !== "member_update") {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord AutoMod event type is invalid.", false);
+    }
+    const actions = inputDenseArray(inputDataProperty(value, "actions", "Discord AutoMod actions"), 1, 3, "Discord AutoMod actions").map(nativeAutoModAction);
+    return Object.freeze({
+        name: inputTextValue(inputDataProperty(value, "name", "Discord AutoMod rule name"), 1, 100, "Discord AutoMod rule name"),
+        eventType,
+        trigger: nativeAutoModTrigger(inputDataProperty(value, "trigger", "Discord AutoMod trigger")),
+        actions: Object.freeze(actions),
+        enabled: inputBoolean(inputDataProperty(value, "enabled", "Discord AutoMod enabled flag"), "Discord AutoMod enabled flag"),
+        exemptRoleIds: inputStringArray(inputDataProperty(value, "exemptRoleIds", "Discord AutoMod exempt role ids"), 0, 20, 20, "Discord AutoMod exempt role ids", true),
+        exemptChannelIds: inputStringArray(inputDataProperty(value, "exemptChannelIds", "Discord AutoMod exempt channel ids"), 0, 20, 20, "Discord AutoMod exempt channel ids", true),
+    });
+};
+const providerAutoModTrigger = (trigger) => {
+    switch (trigger.type) {
+        case "keyword":
+            return Object.freeze({
+                triggerType: AutoModerationRuleTriggerType.Keyword,
+                triggerMetadata: Object.freeze({
+                    keywordFilter: trigger.keywordFilter,
+                    regexPatterns: trigger.regexPatterns,
+                    allowList: trigger.allowList,
+                }),
+            });
+        case "member_profile":
+            return Object.freeze({
+                triggerType: AutoModerationRuleTriggerType.MemberProfile,
+                triggerMetadata: Object.freeze({
+                    keywordFilter: trigger.keywordFilter,
+                    regexPatterns: trigger.regexPatterns,
+                    allowList: trigger.allowList,
+                }),
+            });
+        case "spam":
+            return Object.freeze({ triggerType: AutoModerationRuleTriggerType.Spam });
+        case "keyword_preset":
+            return Object.freeze({
+                triggerType: AutoModerationRuleTriggerType.KeywordPreset,
+                triggerMetadata: Object.freeze({
+                    presets: trigger.presets.map((preset) => NATIVE_AUTOMOD_PRESETS[preset]),
+                    allowList: trigger.allowList,
+                }),
+            });
+        case "mention_spam":
+            return Object.freeze({
+                triggerType: AutoModerationRuleTriggerType.MentionSpam,
+                triggerMetadata: Object.freeze({
+                    mentionTotalLimit: trigger.mentionTotalLimit,
+                    mentionRaidProtectionEnabled: trigger.raidProtectionEnabled,
+                }),
+            });
+    }
+};
+const providerAutoModAction = (action) => {
+    switch (action.type) {
+        case "block_message":
+            return Object.freeze({
+                type: AutoModerationActionType.BlockMessage,
+                ...(action.customMessage === undefined
+                    ? {}
+                    : { metadata: Object.freeze({ customMessage: action.customMessage }) }),
+            });
+        case "send_alert":
+            return Object.freeze({
+                type: AutoModerationActionType.SendAlertMessage,
+                metadata: Object.freeze({ channel: action.channelId }),
+            });
+        case "timeout":
+            return Object.freeze({
+                type: AutoModerationActionType.Timeout,
+                metadata: Object.freeze({ durationSeconds: action.durationSeconds }),
+            });
+        case "block_member_interaction":
+            return Object.freeze({ type: AutoModerationActionType.BlockMemberInteraction });
+    }
+};
+const providerAutoModRule = (rule, auditReason) => {
+    const trigger = providerAutoModTrigger(rule.trigger);
+    return Object.freeze({
+        name: rule.name,
+        eventType: rule.eventType === "message_send"
+            ? AutoModerationRuleEventType.MessageSend
+            : AutoModerationRuleEventType.MemberUpdate,
+        triggerType: trigger.triggerType,
+        ...(trigger.triggerMetadata === undefined
+            ? {}
+            : { triggerMetadata: trigger.triggerMetadata }),
+        actions: Object.freeze(rule.actions.map(providerAutoModAction)),
+        enabled: rule.enabled,
+        exemptRoles: rule.exemptRoleIds,
+        exemptChannels: rule.exemptChannelIds,
+        reason: auditReason,
+    });
+};
+const remoteAutoModEventType = (value) => {
+    switch (value) {
+        case AutoModerationRuleEventType.MessageSend:
+            return "message_send";
+        case AutoModerationRuleEventType.MemberUpdate:
+            return "member_update";
+    }
+};
+const remoteAutoModPreset = (value) => {
+    switch (value) {
+        case AutoModerationRuleKeywordPresetType.Profanity:
+            return "profanity";
+        case AutoModerationRuleKeywordPresetType.SexualContent:
+            return "sexual_content";
+        case AutoModerationRuleKeywordPresetType.Slurs:
+            return "slurs";
+    }
+};
+const remoteAutoModTrigger = (rule) => {
+    const metadata = rule.triggerMetadata;
+    switch (rule.triggerType) {
+        case AutoModerationRuleTriggerType.Keyword:
+        case AutoModerationRuleTriggerType.MemberProfile:
+            return Object.freeze({
+                type: rule.triggerType === AutoModerationRuleTriggerType.Keyword
+                    ? "keyword"
+                    : "member_profile",
+                keywordFilter: responseStringArray(metadata.keywordFilter, 1_000, 60, "Discord AutoMod keyword filter"),
+                regexPatterns: responseStringArray(metadata.regexPatterns, 10, 260, "Discord AutoMod regular expressions"),
+                allowList: responseStringArray(metadata.allowList, 100, 60, "Discord AutoMod allow list"),
+            });
+        case AutoModerationRuleTriggerType.Spam:
+            return Object.freeze({ type: "spam" });
+        case AutoModerationRuleTriggerType.KeywordPreset:
+            return Object.freeze({
+                type: "keyword_preset",
+                presets: Object.freeze(metadata.presets.map(remoteAutoModPreset)),
+                allowList: responseStringArray(metadata.allowList, 100, 60, "Discord AutoMod allow list"),
+            });
+        case AutoModerationRuleTriggerType.MentionSpam:
+            return Object.freeze({
+                type: "mention_spam",
+                mentionTotalLimit: responseBoundedInteger(metadata.mentionTotalLimit, 1, 50, "Discord AutoMod mention limit"),
+                raidProtectionEnabled: responseBoolean(metadata.mentionRaidProtectionEnabled, "Discord AutoMod raid protection"),
+            });
+    }
+};
+const remoteAutoModAction = (action) => {
+    switch (action.type) {
+        case AutoModerationActionType.BlockMessage:
+            return Object.freeze({
+                type: "block_message",
+                ...(action.metadata.customMessage === null
+                    ? {}
+                    : {
+                        customMessage: responseTextValue(action.metadata.customMessage, 1, 150, "Discord AutoMod custom message"),
+                    }),
+            });
+        case AutoModerationActionType.SendAlertMessage:
+            return Object.freeze({
+                type: "send_alert",
+                channelId: responseSnowflake(action.metadata.channelId, "Discord AutoMod alert channel id"),
+            });
+        case AutoModerationActionType.Timeout:
+            return Object.freeze({
+                type: "timeout",
+                durationSeconds: responseBoundedInteger(action.metadata.durationSeconds, 1, 2_419_200, "Discord AutoMod timeout duration"),
+            });
+        case AutoModerationActionType.BlockMemberInteraction:
+            return Object.freeze({ type: "block_member_interaction" });
+    }
+};
+const remoteAutoModRule = (rule, agentUserId) => {
+    if (rule.actions.length < 1 || rule.actions.length > 3) {
+        throw new DiscordCoreError("DISCORD_RESPONSE_TOO_LARGE", "Discord AutoMod action collection is invalid.", false);
+    }
+    const exemptRoleIds = responseStringArray([...rule.exemptRoles.keys()], 20, 20, "Discord AutoMod exempt role ids", true);
+    const exemptChannelIds = responseStringArray([...rule.exemptChannels.keys()], 20, 20, "Discord AutoMod exempt channel ids", true);
+    return Object.freeze({
+        providerRuleId: responseSnowflake(rule.id, "Discord AutoMod rule id"),
+        creatorUserId: responseSnowflake(rule.creatorId, "Discord AutoMod creator id"),
+        managedByCurrentApplication: rule.creatorId === agentUserId,
+        rule: Object.freeze({
+            name: responseTextValue(rule.name, 1, 100, "Discord AutoMod rule name"),
+            eventType: remoteAutoModEventType(rule.eventType),
+            trigger: remoteAutoModTrigger(rule),
+            actions: Object.freeze(rule.actions.map(remoteAutoModAction)),
+            enabled: responseBoolean(rule.enabled, "Discord AutoMod enabled flag"),
+            exemptRoleIds,
+            exemptChannelIds,
+        }),
+    });
+};
+const VOICE_PERMISSION_FLAGS = Object.freeze({
+    view_channel: ["ViewChannel", PermissionFlagsBits.ViewChannel],
+    connect: ["Connect", PermissionFlagsBits.Connect],
+    speak: ["Speak", PermissionFlagsBits.Speak],
+    stream: ["Stream", PermissionFlagsBits.Stream],
+    use_voice_activity: ["UseVAD", PermissionFlagsBits.UseVAD],
+    send_messages: ["SendMessages", PermissionFlagsBits.SendMessages],
+    embed_links: ["EmbedLinks", PermissionFlagsBits.EmbedLinks],
+    read_message_history: ["ReadMessageHistory", PermissionFlagsBits.ReadMessageHistory],
+    manage_channels: ["ManageChannels", PermissionFlagsBits.ManageChannels],
+    manage_roles: ["ManageRoles", PermissionFlagsBits.ManageRoles],
+    move_members: ["MoveMembers", PermissionFlagsBits.MoveMembers],
+});
+const voicePermission = (value) => {
+    if (typeof value !== "string" || !(value in VOICE_PERMISSION_FLAGS)) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord voice-room permission is invalid.", false);
+    }
+    return value;
+};
+const voiceOverwriteTarget = (value) => {
+    const type = inputDataProperty(value, "type", "Discord voice-room overwrite target");
+    if (type !== "member" && type !== "role") {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord voice-room overwrite target is invalid.", false);
+    }
+    return Object.freeze({
+        type,
+        id: inputSnowflake(inputDataProperty(value, "id", "Discord voice-room overwrite target id"), "Discord voice-room overwrite target id"),
+    });
+};
+const voicePermissionArray = (value, label) => {
+    const result = inputDenseArray(value, 0, 11, label).map(voicePermission);
+    if (new Set(result).size !== result.length) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", `${label} has duplicates.`, false);
+    }
+    return Object.freeze(result);
+};
+const voicePermissionOverwrite = (value) => {
+    const allow = voicePermissionArray(inputDataProperty(value, "allow", "Discord voice-room allowed permissions"), "Discord voice-room allowed permissions");
+    const deny = voicePermissionArray(inputDataProperty(value, "deny", "Discord voice-room denied permissions"), "Discord voice-room denied permissions");
+    if (allow.some((permission) => deny.includes(permission))) {
+        throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord voice-room overwrite cannot allow and deny the same permission.", false);
+    }
+    return Object.freeze({
+        target: voiceOverwriteTarget(inputDataProperty(value, "target", "Discord voice-room overwrite target")),
+        allow,
+        deny,
+    });
+};
+const providerVoiceOverwrite = (overwrite) => Object.freeze({
+    id: overwrite.target.id,
+    type: overwrite.target.type === "role" ? OverwriteType.Role : OverwriteType.Member,
+    allow: Object.freeze(overwrite.allow.map((permission) => VOICE_PERMISSION_FLAGS[permission][1])),
+    deny: Object.freeze(overwrite.deny.map((permission) => VOICE_PERMISSION_FLAGS[permission][1])),
+});
+const providerVoiceOverwriteEdit = (overwrite) => {
+    const allow = new Set(overwrite.allow);
+    const deny = new Set(overwrite.deny);
+    const result = {};
+    for (const [permission, [providerName]] of Object.entries(VOICE_PERMISSION_FLAGS)) {
+        result[providerName] = allow.has(permission) ? true : deny.has(permission) ? false : null;
+    }
+    return Object.freeze(result);
+};
 const encodeTextInput = (component) => Object.freeze({
     type: 4,
     custom_id: component.customId,
@@ -704,6 +1376,7 @@ export const normalizeNodeDiscordInteraction = (value) => {
     }
 };
 const NODE_DISCORD_PROVIDER_EXTENSION_PROTOCOL = Symbol("node-discord-provider-extension");
+const NODE_DISCORD_GATEWAY_REST_PROVIDERS = new WeakMap();
 const providerExtensionProtocol = (extension) => {
     if (extension === null || typeof extension !== "object") {
         throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extension is invalid.", false);
@@ -787,13 +1460,30 @@ export class NodeDiscordGatewayAdapter {
     #botToken;
     #listeners = new Set();
     #interactionListeners = new Set();
+    #gatewayEventListeners = new Set();
+    #quarantinedLifecycleListeners = new Set();
+    #quarantinedGatewayEventListeners = new Set();
     #startupTimeoutMs;
     #shutdownTimeoutMs;
     #listenerTimeoutMs;
+    #interactionTimeoutMs;
     #queryTimeoutMs;
     #maximumConcurrentQueries;
+    #maximumConcurrentInteractions;
+    #interactionOverloadContent;
+    #maximumGatewayEventListeners;
+    #maximumGatewayEventBacklog;
     #providerExtensions = new Map();
     #inFlightQueries = new Map();
+    #gatewayEventQueue = [];
+    #pendingRuntimeRecoveries = new Set();
+    #quarantinedInteractionDeliveryCounts = new Map();
+    #interactionDeliveryTasks = new Set();
+    #gatewayEventDrain = null;
+    #gatewayEventOverloaded = false;
+    #activeInteractionDeliveries = 0;
+    #interactionCapacityOverloaded = false;
+    #interactionOverloadResponses = new Set();
     #clientGeneration = 1;
     #queryAbortController = new AbortController();
     #extensionsFrozen = false;
@@ -804,6 +1494,7 @@ export class NodeDiscordGatewayAdapter {
     #stopRequested = false;
     constructor(options) {
         this.#botToken = validatedToken(options.botToken);
+        const internalOptions = options;
         const clientOptions = Object.freeze({
             intents: Object.freeze([...options.intents]),
             ...(options.acknowledgedPrivilegedIntents === undefined
@@ -822,17 +1513,30 @@ export class NodeDiscordGatewayAdapter {
             ...(options.waitGuildTimeoutMs === undefined
                 ? {}
                 : { waitGuildTimeoutMs: options.waitGuildTimeoutMs }),
+            ...(internalOptions[NODE_DISCORD_GATEWAY_REST_OPTIONS] === undefined
+                ? {}
+                : { rest: internalOptions[NODE_DISCORD_GATEWAY_REST_OPTIONS] }),
         });
-        this.#clientFactory = () => createClient(clientOptions);
+        this.#clientFactory = () => {
+            const client = createClient(clientOptions);
+            client.rest.setToken(this.#botToken);
+            return client;
+        };
         this.#client = this.#clientFactory();
+        NODE_DISCORD_GATEWAY_REST_PROVIDERS.set(this, () => this.#client.rest);
         this.#startupTimeoutMs = boundedInteger(options.startupTimeoutMs, 30_000, 1_000, 120_000, "startupTimeoutMs");
         this.#shutdownTimeoutMs = boundedInteger(options.closeTimeoutMs, 5_000, 1_000, 30_000, "closeTimeoutMs");
         this.#listenerTimeoutMs = boundedInteger(options.listenerTimeoutMs, 5_000, 100, 30_000, "listenerTimeoutMs");
+        this.#interactionTimeoutMs = boundedInteger(options.interactionTimeoutMs, 2_000, 100, 2_500, "interactionTimeoutMs");
         this.#queryTimeoutMs = boundedInteger(options.queryTimeoutMs, 10_000, 100, 30_000, "queryTimeoutMs");
         this.#maximumConcurrentQueries = boundedInteger(options.maximumConcurrentQueries, 64, 1, 256, "maximumConcurrentQueries");
-        this.#attachClient(this.#client);
+        this.#maximumConcurrentInteractions = boundedInteger(options.maximumConcurrentInteractions, 32, 1, 256, "maximumConcurrentInteractions");
+        this.#interactionOverloadContent = validatedInteractionOverloadContent(options.interactionOverloadContent);
+        this.#maximumGatewayEventListeners = boundedInteger(options.maximumGatewayEventListeners, 16, 1, 64, "maximumGatewayEventListeners");
+        this.#maximumGatewayEventBacklog = boundedInteger(options.maximumGatewayEventBacklog, 1_024, 1, 10_000, "maximumGatewayEventBacklog");
+        this.#attachClient(this.#client, this.#clientGeneration);
     }
-    #attachClient(client) {
+    #attachClient(client, generation) {
         client.on(Events.ClientReady, (readyClient) => {
             if (this.#client !== client || this.#stopRequested)
                 return;
@@ -863,19 +1567,156 @@ export class NodeDiscordGatewayAdapter {
             void this.#emit({ type: "provider_error", code: "DISCORD_GATEWAY_ERROR" });
         });
         client.on(Events.InteractionCreate, (interaction) => {
-            if (this.#client !== client || this.#stopRequested)
+            if (!this.#ownsGeneration(client, generation))
                 return;
             const normalized = normalizeInteraction(interaction);
             if (normalized !== null)
-                void this.#emitInteraction(normalized);
+                this.#dispatchInteraction(normalized, client, generation);
         });
+        client.on(Events.GuildCreate, (guild) => {
+            this.#forwardGatewayEvent(client, generation, () => guildGatewayEvent("guild_created", guild));
+        });
+        client.on(Events.GuildDelete, (guild) => {
+            this.#forwardGatewayEvent(client, generation, () => guildGatewayEvent("guild_deleted", guild));
+        });
+        client.on(Events.GuildMemberAdd, (member) => {
+            this.#forwardGatewayEvent(client, generation, () => memberGatewayEvent("guild_member_added", member));
+        });
+        client.on(Events.GuildMemberUpdate, (_previous, current) => {
+            this.#forwardGatewayEvent(client, generation, () => memberGatewayEvent("guild_member_updated", current));
+        });
+        client.on(Events.GuildMemberRemove, (member) => {
+            this.#forwardGatewayEvent(client, generation, () => removedMemberGatewayEvent(member));
+        });
+        client.on(Events.VoiceStateUpdate, (previous, current) => {
+            this.#forwardGatewayEvent(client, generation, () => voiceStateGatewayEvent(previous, current));
+        });
+        client.on(Events.MessageCreate, (message) => {
+            this.#forwardGatewayEvent(client, generation, () => messageGatewayEvent(message));
+        });
+        client.on(Events.AutoModerationActionExecution, (execution) => {
+            this.#forwardGatewayEvent(client, generation, () => nativeAutoModGatewayEvent(execution));
+        });
+    }
+    #ownsGeneration(client, generation) {
+        return (this.#client === client &&
+            this.#clientGeneration === generation &&
+            !this.#stopRequested &&
+            !this.#queryAbortController.signal.aborted);
+    }
+    #forwardGatewayEvent(client, generation, normalize) {
+        if (!this.#ownsGeneration(client, generation))
+            return;
+        try {
+            const event = normalize();
+            if (event !== null && this.#ownsGeneration(client, generation)) {
+                this.#enqueueGatewayEvent(event, client, generation);
+            }
+        }
+        catch {
+            // A malformed provider payload is isolated at the SDK boundary.
+        }
+    }
+    #enqueueGatewayEvent(event, client, generation) {
+        if (!this.#ownsGeneration(client, generation))
+            return;
+        if (this.#gatewayEventQueue.length >= this.#maximumGatewayEventBacklog) {
+            if (!this.#gatewayEventOverloaded) {
+                this.#gatewayEventOverloaded = true;
+                void this.#emit({
+                    type: "runtime_degraded",
+                    code: "DISCORD_GATEWAY_EVENT_BACKLOG_EXHAUSTED",
+                });
+            }
+            return;
+        }
+        this.#gatewayEventQueue.push(Object.freeze({ event, client, generation }));
+        this.#startGatewayEventDrain();
+    }
+    #dispatchInteraction(interaction, client, generation) {
+        const listener = this.#interactionListeners.values().next().value;
+        if (listener === undefined ||
+            this.#quarantinedInteractionDeliveryCounts.has(listener) ||
+            this.#activeInteractionDeliveries >= this.#maximumConcurrentInteractions) {
+            if (this.#activeInteractionDeliveries >= this.#maximumConcurrentInteractions &&
+                !this.#interactionCapacityOverloaded) {
+                this.#interactionCapacityOverloaded = true;
+                void this.#emit({
+                    type: "runtime_degraded",
+                    code: "DISCORD_INTERACTION_CAPACITY_EXHAUSTED",
+                });
+            }
+            this.#respondToOverloadedInteraction(interaction, client, generation);
+            return;
+        }
+        this.#activeInteractionDeliveries += 1;
+        const delivery = this.#emitInteraction(interaction, listener, client, generation);
+        this.#interactionDeliveryTasks.add(delivery);
+        void delivery.finally(() => {
+            this.#interactionDeliveryTasks.delete(delivery);
+            this.#activeInteractionDeliveries -= 1;
+            if (this.#interactionCapacityOverloaded &&
+                this.#activeInteractionDeliveries < this.#maximumConcurrentInteractions) {
+                this.#interactionCapacityOverloaded = false;
+                this.#announceRuntimeRecovery("DISCORD_INTERACTION_CAPACITY_EXHAUSTED");
+            }
+        });
+    }
+    #respondToOverloadedInteraction(interaction, client, generation) {
+        if (this.#interactionOverloadResponses.size >= this.#maximumConcurrentInteractions ||
+            interaction.responder.replied ||
+            interaction.responder.deferred ||
+            !this.#ownsGeneration(client, generation)) {
+            return;
+        }
+        const response = interaction.responder
+            .reply({
+            content: this.#interactionOverloadContent,
+            visibility: "ephemeral",
+        })
+            .catch(() => undefined)
+            .finally(() => {
+            this.#interactionOverloadResponses.delete(response);
+        });
+        this.#interactionOverloadResponses.add(response);
+    }
+    #startGatewayEventDrain() {
+        if (this.#gatewayEventDrain !== null || this.#stopRequested)
+            return;
+        const drain = this.#drainGatewayEvents();
+        this.#gatewayEventDrain = drain;
+        void drain.finally(() => {
+            if (this.#gatewayEventDrain !== drain)
+                return;
+            this.#gatewayEventDrain = null;
+            if (this.#gatewayEventQueue.length === 0) {
+                if (this.#gatewayEventOverloaded) {
+                    this.#gatewayEventOverloaded = false;
+                    this.#announceRuntimeRecovery("DISCORD_GATEWAY_EVENT_BACKLOG_EXHAUSTED");
+                }
+            }
+            else
+                this.#startGatewayEventDrain();
+        });
+    }
+    async #drainGatewayEvents() {
+        while (!this.#stopRequested) {
+            const queued = this.#gatewayEventQueue.shift();
+            if (queued === undefined)
+                return;
+            if (!this.#ownsGeneration(queued.client, queued.generation))
+                continue;
+            await this.#emitGatewayEvent(queued.event, queued.client, queued.generation);
+        }
+        this.#gatewayEventQueue.length = 0;
     }
     async #replaceStoppedClient() {
         const client = this.#clientFactory();
         this.#client = client;
         this.#clientGeneration += 1;
         this.#queryAbortController = new AbortController();
-        this.#attachClient(client);
+        this.#gatewayEventQueue.length = 0;
+        this.#attachClient(client, this.#clientGeneration);
         try {
             this.#bindProviderExtensions(client, this.#clientGeneration);
         }
@@ -897,6 +1738,7 @@ export class NodeDiscordGatewayAdapter {
         this.#extensionsFrozen = true;
         if (this.#client.isReady() && !this.#stopRequested) {
             this.#assertProviderExtensionsReady();
+            await this.#flushRuntimeRecoveries();
             return this.#identity(this.#client);
         }
         let shared = this.#startPromise;
@@ -940,7 +1782,15 @@ export class NodeDiscordGatewayAdapter {
         this.#extensionsFrozen = true;
         const startup = this.#startPromise;
         const providerLogin = this.#providerLoginPromise;
+        const gatewayEventDrain = this.#gatewayEventDrain;
+        const interactionDeliveries = [...this.#interactionDeliveryTasks];
+        const overloadResponses = [...this.#interactionOverloadResponses];
         this.#stopRequested = true;
+        this.#gatewayEventQueue.length = 0;
+        if (this.#gatewayEventOverloaded) {
+            this.#gatewayEventOverloaded = false;
+            this.#pendingRuntimeRecoveries.add("DISCORD_GATEWAY_EVENT_BACKLOG_EXHAUSTED");
+        }
         this.#queryAbortController.abort();
         this.#inFlightQueries.delete(this.#clientGeneration);
         this.#startupController?.abort();
@@ -954,6 +1804,26 @@ export class NodeDiscordGatewayAdapter {
                     // final provider cleanup and must not expose the raw SDK error.
                 }
             }
+            if (gatewayEventDrain !== null) {
+                await gatewayEventDrain.catch(() => undefined);
+            }
+            const interactionWork = Promise.allSettled([
+                ...interactionDeliveries,
+                ...overloadResponses,
+            ]);
+            let interactionShutdownTimeout;
+            try {
+                await Promise.race([
+                    interactionWork,
+                    new Promise((resolve) => {
+                        interactionShutdownTimeout = setTimeout(resolve, this.#shutdownTimeoutMs);
+                    }),
+                ]);
+            }
+            finally {
+                if (interactionShutdownTimeout !== undefined)
+                    clearTimeout(interactionShutdownTimeout);
+            }
             await this.#shutdownProviderLogin(providerLogin);
         })();
         this.#stopPromise = stopping;
@@ -966,8 +1836,10 @@ export class NodeDiscordGatewayAdapter {
         }
     }
     async #startOnce(signal) {
-        if (this.#client.isReady())
+        if (this.#client.isReady()) {
+            await this.#flushRuntimeRecoveries();
             return this.#identity(this.#client);
+        }
         let ready;
         const readyPromise = new Promise((resolve) => {
             ready = resolve;
@@ -996,6 +1868,7 @@ export class NodeDiscordGatewayAdapter {
                 timeoutPromise,
                 cancellationPromise,
             ]);
+            await this.#flushRuntimeRecoveries();
             return this.#identity(this.#client);
         }
         catch (error) {
@@ -1123,6 +1996,17 @@ export class NodeDiscordGatewayAdapter {
         }
         this.#interactionListeners.add(listener);
         return () => this.#interactionListeners.delete(listener);
+    }
+    subscribe(listener) {
+        if (typeof listener !== "function") {
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord gateway event listener is invalid.", false);
+        }
+        if (!this.#gatewayEventListeners.has(listener) &&
+            this.#gatewayEventListeners.size >= this.#maximumGatewayEventListeners) {
+            throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "Discord gateway event listener capacity was exceeded.", true);
+        }
+        this.#gatewayEventListeners.add(listener);
+        return () => this.#gatewayEventListeners.delete(listener);
     }
     capture() {
         const client = this.#client;
@@ -1399,7 +2283,472 @@ export class NodeDiscordGatewayAdapter {
             user.setPresence({ activities: [] });
         });
     }
-    async #runCurrentClientOperation(signal, operation) {
+    async readActorFacts(input) {
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord moderation actor input"), "Discord guild id");
+        const actorUserId = inputSnowflake(inputDataProperty(input, "actorUserId", "Discord moderation actor input"), "Discord moderation actor id");
+        const requiredPermission = moderationPermission(inputDataProperty(input, "requiredPermission", "Discord moderation actor input"), false);
+        const signal = inputSignalFrom(input, "Discord moderation actor");
+        return this.#runCurrentClientOperation(signal, async (client) => (await actorModerationFacts(client, guildId, actorUserId, requiredPermission)).facts);
+    }
+    async readChannelFacts(input) {
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord moderation channel input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord moderation channel input"), "Discord channel id");
+        const actorUserId = inputSnowflake(inputDataProperty(input, "actorUserId", "Discord moderation channel input"), "Discord moderation actor id");
+        const signal = inputSignalFrom(input, "Discord moderation channel");
+        return this.#runCurrentClientOperation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const agentUserId = moderationAgentUserId(client);
+            const [actor, agent, channel] = await Promise.all([
+                fetchMemberOrNull(guild, actorUserId),
+                fetchMemberOrNull(guild, agentUserId),
+                guild.channels.fetch(channelId),
+            ]);
+            if (channel === null || !channel.isTextBased() || channel.guildId !== guildId) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord moderation channel is unavailable.", false, 404);
+            }
+            const permission = MODERATION_PERMISSION_FLAGS.manage_messages;
+            return Object.freeze({
+                guildId,
+                actorUserId,
+                agentUserId,
+                requiredPermission: "manage_messages",
+                actorPresent: actor !== null,
+                agentPresent: agent !== null,
+                actorHasRequiredPermission: actor !== null && channel.permissionsFor(actor)?.has(permission) === true,
+                agentHasRequiredPermission: agent !== null && channel.permissionsFor(agent)?.has(permission) === true,
+            });
+        });
+    }
+    async readMemberFacts(input) {
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord moderation member input"), "Discord guild id");
+        const actorUserId = inputSnowflake(inputDataProperty(input, "actorUserId", "Discord moderation member input"), "Discord moderation actor id");
+        const targetUserId = inputSnowflake(inputDataProperty(input, "targetUserId", "Discord moderation member input"), "Discord moderation target id");
+        const requiredPermission = moderationPermission(inputDataProperty(input, "requiredPermission", "Discord moderation member input"), false);
+        if (requiredPermission === "manage_messages") {
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord member moderation permission is invalid.", false);
+        }
+        const signal = inputSignalFrom(input, "Discord moderation member");
+        return this.#runCurrentClientOperation(signal, (client) => memberModerationFacts(client, guildId, actorUserId, targetUserId, requiredPermission));
+    }
+    async deleteRecentMessages(input) {
+        const operationId = inputOperationId(input, "Discord cleanup operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord cleanup input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord cleanup input"), "Discord channel id");
+        const requestedCount = inputInteger(inputDataProperty(input, "requestedCount", "Discord cleanup input"), 1, 100, "Discord cleanup message count");
+        const signal = inputSignalFrom(input, "Discord cleanup");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const channel = await guild.channels.fetch(channelId);
+            if (channel === null ||
+                !channel.isTextBased() ||
+                channel.guildId !== guildId ||
+                !("bulkDelete" in channel)) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord cleanup channel is unavailable.", false, 404);
+            }
+            const deleted = await channel.bulkDelete(requestedCount, true);
+            const deletedCount = responseBoundedInteger(deleted.size, 0, requestedCount, "Discord deleted-message count");
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                channelId,
+                requestedCount,
+                deletedCount,
+                skippedCount: requestedCount - deletedCount,
+            });
+        });
+    }
+    async kickMember(input) {
+        const operationId = inputOperationId(input, "Discord kick operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord kick input"), "Discord guild id");
+        const targetUserId = inputSnowflake(inputDataProperty(input, "targetUserId", "Discord kick input"), "Discord moderation target id");
+        const auditReason = inputAuditReason(input, "Discord kick audit reason");
+        const signal = inputSignalFrom(input, "Discord kick");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const target = await fetchMemberOrNull(guild, targetUserId);
+            if (target === null) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord moderation target is unavailable.", false, 404);
+            }
+            const targetDisplayName = responseTextValue(target.displayName, 1, 128, "Discord moderation target display name");
+            await target.kick(auditReason);
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                targetUserId,
+                targetDisplayName,
+            });
+        });
+    }
+    async banMember(input) {
+        const operationId = inputOperationId(input, "Discord ban operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord ban input"), "Discord guild id");
+        const targetUserId = inputSnowflake(inputDataProperty(input, "targetUserId", "Discord ban input"), "Discord moderation target id");
+        const deleteMessageSeconds = inputInteger(inputDataProperty(input, "deleteMessageSeconds", "Discord ban input"), 0, 604_800, "Discord ban delete-message interval");
+        const auditReason = inputAuditReason(input, "Discord ban audit reason");
+        const signal = inputSignalFrom(input, "Discord ban");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const target = (await fetchMemberOrNull(guild, targetUserId))?.user ??
+                (await client.users.fetch(targetUserId, { force: true }));
+            if (target.id !== targetUserId) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord moderation target response is inconsistent.", false);
+            }
+            const targetDisplayName = responseTextValue(target.displayName, 1, 128, "Discord moderation target display name");
+            await guild.members.ban(targetUserId, { deleteMessageSeconds, reason: auditReason });
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                targetUserId,
+                targetDisplayName,
+            });
+        });
+    }
+    async unbanMember(input) {
+        const operationId = inputOperationId(input, "Discord unban operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord unban input"), "Discord guild id");
+        const targetUserId = inputSnowflake(inputDataProperty(input, "targetUserId", "Discord unban input"), "Discord moderation target id");
+        const auditReason = inputAuditReason(input, "Discord unban audit reason");
+        const signal = inputSignalFrom(input, "Discord unban");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            let ban;
+            try {
+                ban = await guild.bans.fetch({ user: targetUserId, force: true });
+            }
+            catch (error) {
+                if (isProviderNotFoundError(error)) {
+                    throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord ban is unavailable.", false, 404);
+                }
+                throw error;
+            }
+            if (ban.user.id !== targetUserId) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord ban response is inconsistent.", false);
+            }
+            const targetDisplayName = responseTextValue(ban.user.displayName, 1, 128, "Discord moderation target display name");
+            await guild.members.unban(targetUserId, auditReason);
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                targetUserId,
+                targetDisplayName,
+            });
+        });
+    }
+    async deleteMessage(input) {
+        const operationId = inputOperationId(input, "Discord AutoMod delete operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod delete input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord AutoMod delete input"), "Discord channel id");
+        const messageId = inputSnowflake(inputDataProperty(input, "messageId", "Discord AutoMod delete input"), "Discord message id");
+        const signal = inputSignalFrom(input, "Discord AutoMod delete");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            try {
+                const guild = await resolveGuild(client, guildId);
+                const channel = await guild.channels.fetch(channelId);
+                if (channel === null ||
+                    !channel.isTextBased() ||
+                    channel.guildId !== guildId ||
+                    !("messages" in channel)) {
+                    throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord AutoMod message channel is unavailable.", false, 404);
+                }
+                const message = await channel.messages.fetch(messageId);
+                if (message.id !== messageId) {
+                    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord AutoMod message response is inconsistent.", false);
+                }
+                await message.delete();
+            }
+            catch (error) {
+                if (!isProviderNotFoundError(error))
+                    throw error;
+            }
+            return Object.freeze({ operationId, status: "applied" });
+        });
+    }
+    async timeoutMember(input) {
+        const operationId = inputOperationId(input, "Discord AutoMod timeout operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod timeout input"), "Discord guild id");
+        const userId = inputSnowflake(inputDataProperty(input, "userId", "Discord AutoMod timeout input"), "Discord member id");
+        const durationSeconds = inputInteger(inputDataProperty(input, "durationSeconds", "Discord AutoMod timeout input"), 1, 2_419_200, "Discord AutoMod timeout duration");
+        const auditReason = inputAuditReason(input, "Discord AutoMod timeout audit reason");
+        const signal = inputSignalFrom(input, "Discord AutoMod timeout");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const member = await fetchMemberOrNull(guild, userId);
+            if (member === null) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord AutoMod member is unavailable.", false, 404);
+            }
+            await member.timeout(durationSeconds * 1_000, auditReason);
+            return Object.freeze({ operationId, status: "applied" });
+        });
+    }
+    async listRules(input) {
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod list input"), "Discord guild id");
+        const signal = inputSignalFrom(input, "Discord AutoMod list");
+        return this.#runCurrentClientOperation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const agentUserId = moderationAgentUserId(client);
+            const rules = await guild.autoModerationRules.fetch();
+            if (rules.size > 100) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_TOO_LARGE", "Discord AutoMod rule collection exceeds its limit.", false);
+            }
+            const result = [];
+            const ids = new Set();
+            for (const [providerRuleId, rule] of rules) {
+                const snapshot = remoteAutoModRule(rule, agentUserId);
+                if (providerRuleId !== snapshot.providerRuleId || ids.has(snapshot.providerRuleId)) {
+                    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord AutoMod rule collection is inconsistent.", false);
+                }
+                ids.add(snapshot.providerRuleId);
+                result.push(snapshot);
+            }
+            result.sort((left, right) => left.providerRuleId.localeCompare(right.providerRuleId, "en"));
+            return Object.freeze(result);
+        });
+    }
+    async readRule(input) {
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod read input"), "Discord guild id");
+        const providerRuleId = inputSnowflake(inputDataProperty(input, "providerRuleId", "Discord AutoMod read input"), "Discord AutoMod rule id");
+        const signal = inputSignalFrom(input, "Discord AutoMod read");
+        return this.#runCurrentClientOperation(signal, async (client) => {
+            try {
+                const guild = await resolveGuild(client, guildId);
+                const rule = await guild.autoModerationRules.fetch(providerRuleId);
+                if (rule.id !== providerRuleId) {
+                    throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord AutoMod rule response is inconsistent.", false);
+                }
+                return remoteAutoModRule(rule, moderationAgentUserId(client));
+            }
+            catch (error) {
+                if (isProviderNotFoundError(error))
+                    return null;
+                throw error;
+            }
+        });
+    }
+    async createRule(input) {
+        const operationId = inputOperationId(input, "Discord AutoMod create operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod create input"), "Discord guild id");
+        const rule = nativeAutoModRulePlan(inputDataProperty(input, "rule", "Discord AutoMod create input"));
+        const auditReason = inputAuditReason(input, "Discord AutoMod create audit reason");
+        const signal = inputSignalFrom(input, "Discord AutoMod create");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const created = await guild.autoModerationRules.create(providerAutoModRule(rule, auditReason));
+            const providerRuleId = responseSnowflake(created.id, "Discord AutoMod rule id");
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                providerRuleId,
+            });
+        });
+    }
+    async updateRule(input) {
+        const operationId = inputOperationId(input, "Discord AutoMod update operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod update input"), "Discord guild id");
+        const providerRuleId = inputSnowflake(inputDataProperty(input, "providerRuleId", "Discord AutoMod update input"), "Discord AutoMod rule id");
+        const rule = nativeAutoModRulePlan(inputDataProperty(input, "rule", "Discord AutoMod update input"));
+        const auditReason = inputAuditReason(input, "Discord AutoMod update audit reason");
+        const signal = inputSignalFrom(input, "Discord AutoMod update");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const desired = providerAutoModRule(rule, auditReason);
+            const existing = await guild.autoModerationRules.fetch(providerRuleId);
+            if (existing.id !== providerRuleId) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord AutoMod rule response is inconsistent.", false);
+            }
+            if (existing.triggerType !== desired.triggerType) {
+                throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord AutoMod trigger type is immutable; replace the rule explicitly.", false);
+            }
+            const { triggerType: _triggerType, ...editable } = desired;
+            const updated = await guild.autoModerationRules.edit(providerRuleId, editable);
+            if (updated.id !== providerRuleId) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord AutoMod update response is inconsistent.", false);
+            }
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                providerRuleId,
+            });
+        });
+    }
+    async deleteRule(input) {
+        const operationId = inputOperationId(input, "Discord AutoMod delete-rule operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord AutoMod delete-rule input"), "Discord guild id");
+        const providerRuleId = inputSnowflake(inputDataProperty(input, "providerRuleId", "Discord AutoMod delete-rule input"), "Discord AutoMod rule id");
+        const auditReason = inputAuditReason(input, "Discord AutoMod delete-rule audit reason");
+        const signal = inputSignalFrom(input, "Discord AutoMod delete-rule");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            try {
+                const guild = await resolveGuild(client, guildId);
+                await guild.autoModerationRules.delete(providerRuleId, auditReason);
+            }
+            catch (error) {
+                if (!isProviderNotFoundError(error))
+                    throw error;
+            }
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                providerRuleId,
+            });
+        });
+    }
+    async createRoom(input) {
+        const operationId = inputOperationId(input, "Discord voice-room create operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room create input"), "Discord guild id");
+        const parentCategoryId = inputSnowflake(inputDataProperty(input, "parentCategoryId", "Discord voice-room create input"), "Discord voice-room category id");
+        const name = inputTextValue(inputDataProperty(input, "name", "Discord voice-room create input"), 1, 100, "Discord voice-room name");
+        const userLimit = inputInteger(inputDataProperty(input, "userLimit", "Discord voice-room create input"), 0, 99, "Discord voice-room user limit");
+        const permissionOverwrites = inputDenseArray(inputDataProperty(input, "permissionOverwrites", "Discord voice-room create input"), 0, 100, "Discord voice-room permission overwrites").map(voicePermissionOverwrite);
+        const targets = new Set(permissionOverwrites.map((overwrite) => overwrite.target.id));
+        if (targets.size !== permissionOverwrites.length) {
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord voice-room permission overwrite targets have duplicates.", false);
+        }
+        const auditReason = inputAuditReason(input, "Discord voice-room create audit reason");
+        const signal = inputSignalFrom(input, "Discord voice-room create");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const parent = await guild.channels.fetch(parentCategoryId);
+            if (parent === null || parent.type !== ChannelType.GuildCategory) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord voice-room category is unavailable.", false, 404);
+            }
+            const channel = await guild.channels.create({
+                name,
+                type: ChannelType.GuildVoice,
+                parent: parentCategoryId,
+                userLimit,
+                permissionOverwrites: permissionOverwrites.map(providerVoiceOverwrite),
+                reason: auditReason,
+            });
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                channelId: responseSnowflake(channel.id, "Discord voice-room channel id"),
+            });
+        });
+    }
+    async moveMember(input) {
+        const operationId = inputOperationId(input, "Discord voice-room move operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room move input"), "Discord guild id");
+        const userId = inputSnowflake(inputDataProperty(input, "userId", "Discord voice-room move input"), "Discord member id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord voice-room move input"), "Discord voice-room channel id");
+        const auditReason = inputAuditReason(input, "Discord voice-room move audit reason");
+        const signal = inputSignalFrom(input, "Discord voice-room move");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const [member, channel] = await Promise.all([
+                guild.members.fetch(userId),
+                guild.channels.fetch(channelId),
+            ]);
+            if (channel === null || channel.type !== ChannelType.GuildVoice) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord voice-room channel is unavailable.", false, 404);
+            }
+            await member.voice.setChannel(channel, auditReason);
+            return Object.freeze({ operationId, status: "applied", guildId, channelId });
+        });
+    }
+    async updateRoom(input) {
+        const operationId = inputOperationId(input, "Discord voice-room update operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room update input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord voice-room update input"), "Discord voice-room channel id");
+        const nameValue = inputDataProperty(input, "name", "Discord voice-room name", true);
+        const userLimitValue = inputDataProperty(input, "userLimit", "Discord voice-room user limit", true);
+        if (nameValue === undefined && userLimitValue === undefined) {
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord voice-room update contains no changes.", false);
+        }
+        const name = nameValue === undefined
+            ? undefined
+            : inputTextValue(nameValue, 1, 100, "Discord voice-room name");
+        const userLimit = userLimitValue === undefined
+            ? undefined
+            : inputInteger(userLimitValue, 0, 99, "Discord voice-room user limit");
+        const auditReason = inputAuditReason(input, "Discord voice-room update audit reason");
+        const signal = inputSignalFrom(input, "Discord voice-room update");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const channel = await guild.channels.fetch(channelId);
+            if (channel === null || channel.type !== ChannelType.GuildVoice) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord voice-room channel is unavailable.", false, 404);
+            }
+            const updated = await channel.edit({
+                ...(name === undefined ? {} : { name }),
+                ...(userLimit === undefined ? {} : { userLimit }),
+                reason: auditReason,
+            });
+            if (updated.id !== channelId) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord voice-room update response is inconsistent.", false);
+            }
+            return Object.freeze({ operationId, status: "applied", guildId, channelId });
+        });
+    }
+    async upsertPermissionOverwrite(input) {
+        const operationId = inputOperationId(input, "Discord voice-room overwrite operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room overwrite input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord voice-room overwrite input"), "Discord voice-room channel id");
+        const overwrite = voicePermissionOverwrite(inputDataProperty(input, "overwrite", "Discord voice-room overwrite input"));
+        const auditReason = inputAuditReason(input, "Discord voice-room overwrite audit reason");
+        const signal = inputSignalFrom(input, "Discord voice-room overwrite");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const channel = await guild.channels.fetch(channelId);
+            if (channel === null || channel.type !== ChannelType.GuildVoice) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord voice-room channel is unavailable.", false, 404);
+            }
+            await channel.permissionOverwrites.edit(overwrite.target.id, providerVoiceOverwriteEdit(overwrite), {
+                reason: auditReason,
+                type: overwrite.target.type === "role" ? OverwriteType.Role : OverwriteType.Member,
+            });
+            return Object.freeze({ operationId, status: "applied", guildId, channelId });
+        });
+    }
+    async deletePermissionOverwrite(input) {
+        const operationId = inputOperationId(input, "Discord voice-room overwrite-delete operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room overwrite-delete input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord voice-room overwrite-delete input"), "Discord voice-room channel id");
+        const target = voiceOverwriteTarget(inputDataProperty(input, "target", "Discord voice-room overwrite-delete input"));
+        const auditReason = inputAuditReason(input, "Discord voice-room overwrite-delete audit reason");
+        const signal = inputSignalFrom(input, "Discord voice-room overwrite-delete");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const channel = await guild.channels.fetch(channelId);
+            if (channel === null || channel.type !== ChannelType.GuildVoice) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord voice-room channel is unavailable.", false, 404);
+            }
+            const existing = channel.permissionOverwrites.cache.get(target.id);
+            const expectedType = target.type === "role" ? OverwriteType.Role : OverwriteType.Member;
+            if (existing !== undefined && existing.type !== expectedType) {
+                throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord voice-room overwrite target is inconsistent.", false);
+            }
+            if (existing !== undefined) {
+                await channel.permissionOverwrites.delete(target.id, auditReason);
+            }
+            return Object.freeze({ operationId, status: "applied", guildId, channelId });
+        });
+    }
+    async deleteRoom(input) {
+        const operationId = inputOperationId(input, "Discord voice-room delete operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room delete input"), "Discord guild id");
+        const channelId = inputSnowflake(inputDataProperty(input, "channelId", "Discord voice-room delete input"), "Discord voice-room channel id");
+        const auditReason = inputAuditReason(input, "Discord voice-room delete audit reason");
+        const signal = inputSignalFrom(input, "Discord voice-room delete");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const channel = await guild.channels.fetch(channelId);
+            if (channel === null || channel.type !== ChannelType.GuildVoice) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord voice-room channel is unavailable.", false, 404);
+            }
+            await channel.delete(auditReason);
+            return Object.freeze({ operationId, status: "applied", guildId, channelId });
+        });
+    }
+    async #runCurrentClientOperation(signal, operation, operationKind = "read") {
         if (signal?.aborted === true) {
             throw new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false);
         }
@@ -1414,8 +2763,18 @@ export class NodeDiscordGatewayAdapter {
             throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "Discord concurrent query capacity was exceeded.", true);
         }
         this.#inFlightQueries.set(generation, currentCount + 1);
+        let dispatched = false;
+        const interrupted = (summary) => operationKind === "mutation" && dispatched
+            ? new DiscordCoreError("DISCORD_OUTCOME_UNKNOWN", "Discord mutation outcome is unknown and requires reconciliation.", false)
+            : new DiscordCoreError("DISCORD_CANCELLED", summary, false);
         const providerOperation = Promise.resolve()
-            .then(() => operation(client))
+            .then(() => {
+            if (signal?.aborted === true || lifecycleSignal.aborted) {
+                throw interrupted("Discord operation was cancelled before dispatch.");
+            }
+            dispatched = true;
+            return operation(client);
+        })
             .finally(() => {
             const count = this.#inFlightQueries.get(generation);
             if (count === undefined)
@@ -1429,11 +2788,13 @@ export class NodeDiscordGatewayAdapter {
         const boundary = new Promise((_resolve, reject) => {
             rejectBoundary = reject;
         });
-        const onCallerAbort = () => rejectBoundary(new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false));
-        const onLifecycleAbort = () => rejectBoundary(new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway generation stopped.", false));
+        const onCallerAbort = () => rejectBoundary(interrupted("Discord operation was cancelled."));
+        const onLifecycleAbort = () => rejectBoundary(interrupted("Discord gateway generation stopped."));
         signal?.addEventListener("abort", onCallerAbort, { once: true });
         lifecycleSignal.addEventListener("abort", onLifecycleAbort, { once: true });
-        const timeout = setTimeout(() => rejectBoundary(new DiscordCoreError("DISCORD_TIMEOUT", "Discord operation exceeded its deadline.", true)), this.#queryTimeoutMs);
+        const timeout = setTimeout(() => rejectBoundary(operationKind === "mutation" && dispatched
+            ? new DiscordCoreError("DISCORD_OUTCOME_UNKNOWN", "Discord mutation outcome is unknown and requires reconciliation.", false)
+            : new DiscordCoreError("DISCORD_TIMEOUT", "Discord operation exceeded its deadline.", true)), this.#queryTimeoutMs);
         try {
             const result = await Promise.race([providerOperation, boundary]);
             if (this.#client !== client ||
@@ -1441,7 +2802,7 @@ export class NodeDiscordGatewayAdapter {
                 this.#stopRequested ||
                 lifecycleSignal.aborted ||
                 !client.isReady()) {
-                throw new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway generation changed during the operation.", false);
+                throw interrupted("Discord gateway generation changed during the operation.");
             }
             return result;
         }
@@ -1449,7 +2810,20 @@ export class NodeDiscordGatewayAdapter {
             if (error instanceof DiscordCoreError)
                 throw error;
             if (isAbortRequested(signal) || isAbortRequested(lifecycleSignal)) {
-                throw new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false);
+                throw interrupted("Discord operation was cancelled.");
+            }
+            if (operationKind === "mutation" && dispatched) {
+                const status = providerStatus(error);
+                const definitivelyRejected = error instanceof RateLimitError ||
+                    status === 429 ||
+                    (status !== null &&
+                        status >= 400 &&
+                        status < 500 &&
+                        status !== 408 &&
+                        status !== 425);
+                if (!definitivelyRejected) {
+                    throw new DiscordCoreError("DISCORD_OUTCOME_UNKNOWN", "Discord mutation outcome is unknown and requires reconciliation.", false);
+                }
             }
             throw providerFailure(error);
         }
@@ -1458,6 +2832,9 @@ export class NodeDiscordGatewayAdapter {
             signal?.removeEventListener("abort", onCallerAbort);
             lifecycleSignal.removeEventListener("abort", onLifecycleAbort);
         }
+    }
+    #runCurrentClientMutation(signal, operation) {
+        return this.#runCurrentClientOperation(signal, operation, "mutation");
     }
     registerProviderExtension(extension) {
         if (this.#extensionsFrozen) {
@@ -1619,34 +2996,152 @@ export class NodeDiscordGatewayAdapter {
         return Object.freeze({ component: "node-discord-gateway-adapter" });
     }
     async #emit(event) {
-        await Promise.allSettled([...this.#listeners].map((listener) => this.#deliverBounded(() => listener(event))));
+        await Promise.allSettled([...this.#listeners].map((listener) => this.#deliverLifecycleEventBounded(listener, event)));
     }
-    async #emitInteraction(interaction) {
-        const listener = this.#interactionListeners.values().next().value;
-        if (listener === undefined)
+    async #emitInteraction(interaction, listener, client, generation) {
+        if (!this.#ownsGeneration(client, generation)) {
             return;
-        try {
-            await this.#deliverBounded(() => listener(interaction));
         }
-        catch {
-            // Interaction errors are isolated from the provider event emitter. The
-            // product router owns response/error presentation through the responder.
-        }
-    }
-    async #deliverBounded(deliver) {
         let timeout;
+        let timedOut = false;
+        const delivery = Promise.resolve()
+            .then(() => {
+            if (!this.#ownsGeneration(client, generation))
+                return;
+            return listener(interaction);
+        })
+            .catch(() => undefined);
         try {
             await Promise.race([
-                Promise.resolve().then(deliver),
+                delivery,
                 new Promise((resolve) => {
-                    timeout = setTimeout(resolve, this.#listenerTimeoutMs);
+                    timeout = setTimeout(() => {
+                        timedOut = true;
+                        resolve();
+                    }, this.#interactionTimeoutMs);
                 }),
             ]);
         }
         finally {
             if (timeout !== undefined)
                 clearTimeout(timeout);
+            if (timedOut) {
+                this.#respondToOverloadedInteraction(interaction, client, generation);
+                const previousCount = this.#quarantinedInteractionDeliveryCounts.get(listener) ?? 0;
+                this.#quarantinedInteractionDeliveryCounts.set(listener, previousCount + 1);
+                void delivery.finally(() => {
+                    const remaining = (this.#quarantinedInteractionDeliveryCounts.get(listener) ?? 1) - 1;
+                    if (remaining > 0) {
+                        this.#quarantinedInteractionDeliveryCounts.set(listener, remaining);
+                        return;
+                    }
+                    this.#quarantinedInteractionDeliveryCounts.delete(listener);
+                    this.#announceRuntimeRecovery("DISCORD_INTERACTION_ROUTER_QUARANTINED");
+                });
+                if (previousCount === 0) {
+                    await this.#emit({
+                        type: "runtime_degraded",
+                        code: "DISCORD_INTERACTION_ROUTER_QUARANTINED",
+                    });
+                }
+            }
         }
+    }
+    async #emitGatewayEvent(event, client, generation) {
+        if (!this.#ownsGeneration(client, generation))
+            return;
+        await Promise.allSettled([...this.#gatewayEventListeners].map((listener) => this.#deliverGatewayEventBounded(listener, event, client, generation)));
+    }
+    async #deliverGatewayEventBounded(listener, event, client, generation) {
+        if (this.#quarantinedGatewayEventListeners.has(listener))
+            return;
+        let timeout;
+        let timedOut = false;
+        const delivery = Promise.resolve()
+            .then(() => {
+            if (!this.#ownsGeneration(client, generation))
+                return;
+            return listener(event);
+        })
+            .catch(() => undefined);
+        try {
+            await Promise.race([
+                delivery,
+                new Promise((resolve) => {
+                    timeout = setTimeout(() => {
+                        timedOut = true;
+                        resolve();
+                    }, this.#listenerTimeoutMs);
+                }),
+            ]);
+        }
+        finally {
+            if (timeout !== undefined)
+                clearTimeout(timeout);
+            if (timedOut) {
+                // A non-cooperative listener remains at most one orphaned promise.
+                // It is skipped until that delivery settles and the lifecycle stream
+                // exposes the degradation so the product can restart or shed work.
+                const wasHealthy = this.#quarantinedGatewayEventListeners.size === 0;
+                this.#quarantinedGatewayEventListeners.add(listener);
+                void delivery.finally(() => {
+                    this.#quarantinedGatewayEventListeners.delete(listener);
+                    if (this.#quarantinedGatewayEventListeners.size === 0) {
+                        this.#announceRuntimeRecovery("DISCORD_GATEWAY_EVENT_LISTENER_QUARANTINED");
+                    }
+                });
+                if (wasHealthy) {
+                    await this.#emit({
+                        type: "runtime_degraded",
+                        code: "DISCORD_GATEWAY_EVENT_LISTENER_QUARANTINED",
+                    });
+                }
+            }
+        }
+    }
+    async #deliverLifecycleEventBounded(listener, event) {
+        if (this.#quarantinedLifecycleListeners.has(listener))
+            return;
+        let timeout;
+        let timedOut = false;
+        const delivery = Promise.resolve()
+            .then(() => listener(event))
+            .catch(() => undefined);
+        try {
+            await Promise.race([
+                delivery,
+                new Promise((resolve) => {
+                    timeout = setTimeout(() => {
+                        timedOut = true;
+                        resolve();
+                    }, this.#listenerTimeoutMs);
+                }),
+            ]);
+        }
+        finally {
+            if (timeout !== undefined)
+                clearTimeout(timeout);
+            if (timedOut) {
+                this.#quarantinedLifecycleListeners.add(listener);
+                void delivery.finally(() => {
+                    this.#quarantinedLifecycleListeners.delete(listener);
+                });
+            }
+        }
+    }
+    #announceRuntimeRecovery(code) {
+        if (this.#stopRequested) {
+            this.#pendingRuntimeRecoveries.add(code);
+            return;
+        }
+        void this.#emit({ type: "runtime_recovered", code });
+    }
+    async #flushRuntimeRecoveries() {
+        if (this.#stopRequested || this.#pendingRuntimeRecoveries.size === 0)
+            return;
+        const recovered = [...this.#pendingRuntimeRecoveries];
+        this.#pendingRuntimeRecoveries.clear();
+        await Promise.allSettled(recovered.map((code) => this.#emit({ type: "runtime_recovered", code })));
     }
     #identity(client) {
         const applicationId = client.application?.id;
@@ -1735,18 +3230,18 @@ const normalizeRemoteApplicationCommand = (value, scope) => {
  * depend on the provider library directly.
  */
 export class NodeDiscordRestAdapter {
-    #rest;
+    #restProvider;
     constructor(options) {
-        const rest = new REST({
-            version: "10",
-            timeout: boundedInteger(options.timeoutMs, 15_000, 100, 30_000, "timeoutMs"),
-            retries: boundedInteger(options.retries, 3, 0, 5, "retries"),
-            globalRequestsPerSecond: boundedInteger(options.globalRequestsPerSecond, 50, 1, 50, "globalRequestsPerSecond"),
-            invalidRequestWarningInterval: boundedInteger(options.invalidRequestWarningInterval, 250, 0, 10_000, "invalidRequestWarningInterval"),
-            userAgentAppendix: "DiscordBot (https://github.com/Anto426-Project/discord-bot-core, 0.1.0)",
-        });
-        rest.setToken(validatedToken(options.botToken));
-        this.#rest = rest;
+        const token = validatedToken(options.botToken);
+        const sdkOptions = nodeDiscordRestSdkOptions(options);
+        const provider = options[NODE_DISCORD_REST_PROVIDER];
+        if (provider === undefined) {
+            const rest = new REST(sdkOptions);
+            rest.setToken(token);
+            this.#restProvider = () => rest;
+            return;
+        }
+        this.#restProvider = provider;
     }
     toJSON() {
         return Object.freeze({ component: "node-discord-rest-adapter" });
@@ -1754,7 +3249,7 @@ export class NodeDiscordRestAdapter {
     async listApplicationCommands(scope, signal) {
         let response;
         try {
-            response = await this.#rest.get(commandCollectionRoute(scope), {
+            response = await this.#restProvider().get(commandCollectionRoute(scope), {
                 query: new URLSearchParams({ with_localizations: "true" }),
                 ...(signal === undefined ? {} : { signal }),
             });
@@ -1780,7 +3275,7 @@ export class NodeDiscordRestAdapter {
     }
     async createApplicationCommand(scope, command, signal) {
         try {
-            const response = await this.#rest.post(commandCollectionRoute(scope), {
+            const response = await this.#restProvider().post(commandCollectionRoute(scope), {
                 body: command,
                 ...(signal === undefined ? {} : { signal }),
             });
@@ -1792,7 +3287,7 @@ export class NodeDiscordRestAdapter {
     }
     async updateApplicationCommand(scope, providerCommandId, command, signal) {
         try {
-            const response = await this.#rest.patch(commandItemRoute(scope, providerCommandId), {
+            const response = await this.#restProvider().patch(commandItemRoute(scope, providerCommandId), {
                 body: command,
                 ...(signal === undefined ? {} : { signal }),
             });
@@ -1804,7 +3299,7 @@ export class NodeDiscordRestAdapter {
     }
     async deleteApplicationCommand(scope, providerCommandId, signal) {
         try {
-            await this.#rest.delete(commandItemRoute(scope, providerCommandId), {
+            await this.#restProvider().delete(commandItemRoute(scope, providerCommandId), {
                 ...(signal === undefined ? {} : { signal }),
             });
             return "deleted";
@@ -1819,10 +3314,10 @@ export class NodeDiscordRestAdapter {
         const channelId = parseDiscordSnowflake(input.channelId, "Discord channel id");
         return this.sendMessageToChannel(channelId, input.message, input.signal, false);
     }
-    async sendMessageToChannel(channelId, message, signal, classifyRecipientUnreachable) {
+    async sendMessageToChannel(channelId, message, signal, classifyRecipientUnreachable, rest = this.#restProvider()) {
         let response;
         try {
-            response = await this.#rest.post(Routes.channelMessages(channelId), {
+            response = await rest.post(Routes.channelMessages(channelId), {
                 body: createSafeDiscordMessage(message, channelId),
                 ...(signal === undefined ? {} : { signal }),
             });
@@ -1836,9 +3331,10 @@ export class NodeDiscordRestAdapter {
     }
     async sendDirectMessage(input) {
         const recipientId = parseDiscordSnowflake(input.recipientId, "Discord recipient id");
+        const rest = this.#restProvider();
         let response;
         try {
-            response = await this.#rest.post(Routes.userChannels(), {
+            response = await rest.post(Routes.userChannels(), {
                 body: Object.freeze({ recipient_id: recipientId }),
                 ...(input.signal === undefined ? {} : { signal: input.signal }),
             });
@@ -1847,7 +3343,7 @@ export class NodeDiscordRestAdapter {
             throw directMessageFailureForSignal(error, input.signal);
         }
         const channelId = parseDiscordSnowflake(responseString(responseRecord(response), "id", "Discord DM channel id"), "Discord DM channel id");
-        return this.sendMessageToChannel(channelId, input.message, input.signal, true);
+        return this.sendMessageToChannel(channelId, input.message, input.signal, true, rest);
     }
     deliveryReceipt(value, expectedChannelId) {
         const record = responseRecord(value);
@@ -1866,14 +3362,24 @@ export class NodeDiscordRestAdapter {
  * stable core ports. Products never receive either provider client.
  */
 export const createNodeDiscordRuntime = (options) => {
-    const gateway = new NodeDiscordGatewayAdapter({
+    const gatewayOptions = {
         ...options.gateway,
         botToken: options.botToken,
-    });
-    const rest = new NodeDiscordRestAdapter({
+        ...(options.rest === undefined
+            ? {}
+            : { [NODE_DISCORD_GATEWAY_REST_OPTIONS]: options.rest }),
+    };
+    const gateway = new NodeDiscordGatewayAdapter(gatewayOptions);
+    const restProvider = NODE_DISCORD_GATEWAY_REST_PROVIDERS.get(gateway);
+    if (restProvider === undefined) {
+        throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord REST coordinator is unavailable.", false);
+    }
+    const restOptions = {
         ...(options.rest ?? {}),
         botToken: options.botToken,
-    });
+        [NODE_DISCORD_REST_PROVIDER]: restProvider,
+    };
+    const rest = new NodeDiscordRestAdapter(restOptions);
     return Object.freeze({
         gateway,
         extensions: gateway,
@@ -1881,6 +3387,11 @@ export const createNodeDiscordRuntime = (options) => {
         guilds: gateway,
         profiles: gateway,
         presence: gateway,
+        events: gateway,
+        moderation: gateway,
+        botAutoMod: gateway,
+        nativeAutoMod: gateway,
+        voiceRooms: gateway,
         commands: rest,
         messages: rest,
     });

@@ -13,12 +13,15 @@ code consumes only the ports and immutable DTOs exported by this package.
   and deterministic nonce;
 - provider-neutral embed plans and dynamic colors through the separately
   pinned `@anto-project/dynamic-embed-engine` submodule;
-- provider-managed REST buckets and global rate-limit coordination;
+- one provider-managed REST coordinator per runtime generation, shared by the
+  gateway, commands and messages;
 - safe provider receipts and redacted errors;
 - application-command projection and ownership-safe reconciliation;
 - explicit interaction and event routers;
 - generation-scoped gateway inspection, bounded guild/member directory reads,
   immutable profile projections and presence control;
+- provider-neutral gateway events that never expose message content, plus
+  technical moderation, native/bot AutoMod and voice-room effect ports;
 - an opaque, generation-aware provider-extension host for concrete technical
   adapters such as music playback, plus a callback-only bridge factory that
   lets the product compose them without exposing the SDK client or protocol;
@@ -65,6 +68,21 @@ runtime communication between the two products.
 - Directory/profile operations have one total deadline, a bounded in-flight
   capacity and a gateway-generation cancellation signal. A stopped client can
   never return a late result into a restarted product runtime.
+- Operational reads and mutations use the same generation-scoped deadline and
+  capacity boundary. Their receipts contain only bounded technical facts;
+  authorization, audit intent, reconciliation and product workflow remain in
+  the consuming bot.
+- Gateway message events expose only a normalized SHA-256 content fingerprint;
+  raw message text never crosses the SDK adapter.
+- Gateway events pass through a bounded ordered backlog, while interactions use
+  a separate bounded-concurrency lane so a slow event cannot delay Discord's
+  acknowledgement window. At capacity, the core sends one bounded ephemeral
+  overload response. Listener/router quarantine, overload and their recovery
+  are surfaced explicitly through lifecycle events.
+- Mutation `operationId` values are correlation keys owned by the product, not
+  a claim of provider idempotency. Cancellation or timeout after dispatch is
+  reported as non-retryable `DISCORD_OUTCOME_UNKNOWN`; the product must
+  reconcile durable intent with provider state before issuing another effect.
 
 ## Submodule consumption
 

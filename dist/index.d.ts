@@ -1,5 +1,6 @@
 export * from "../vendor/dynamic-embed-engine/dist/index.js";
 export * from "./availability.js";
+export * from "./automod.js";
 export * from "./command-model.js";
 export * from "./command-publisher.js";
 export * from "./components.js";
@@ -7,14 +8,17 @@ export * from "./delivery.js";
 export * from "./errors.js";
 export * from "./events.js";
 export * from "./gateway.js";
+export * from "./gateway-events.js";
 export * from "./guild-directory.js";
 export * from "./identifiers.js";
 export * from "./inspection.js";
 export * from "./interactions.js";
 export * from "./markdown.js";
+export * from "./moderation.js";
 export * from "./payload.js";
 export * from "./presence.js";
 export * from "./profiles.js";
 export * from "./retry.js";
 export * from "./router.js";
+export * from "./voice-rooms.js";
 //# sourceMappingURL=index.d.ts.map

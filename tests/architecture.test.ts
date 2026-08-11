@@ -107,6 +107,11 @@ describe("discord bot core architecture", () => {
     assert.equal(runtime.guilds, runtime.gateway);
     assert.equal(runtime.profiles, runtime.gateway);
     assert.equal(runtime.presence, runtime.gateway);
+    assert.equal(runtime.events, runtime.gateway);
+    assert.equal(runtime.moderation, runtime.gateway);
+    assert.equal(runtime.botAutoMod, runtime.gateway);
+    assert.equal(runtime.nativeAutoMod, runtime.gateway);
+    assert.equal(runtime.voiceRooms, runtime.gateway);
     assert.doesNotMatch(JSON.stringify(runtime), /provider-token/u);
   });
 

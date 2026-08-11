@@ -6,12 +6,29 @@ export type DiscordGatewayIdentity = Readonly<{
   applicationId: string;
 }>;
 
+export type DiscordGatewayRuntimeCondition =
+  | "DISCORD_GATEWAY_EVENT_BACKLOG_EXHAUSTED"
+  | "DISCORD_GATEWAY_EVENT_LISTENER_QUARANTINED"
+  | "DISCORD_INTERACTION_CAPACITY_EXHAUSTED"
+  | "DISCORD_INTERACTION_ROUTER_QUARANTINED";
+
 export type DiscordGatewayLifecycleEvent =
   | Readonly<{ type: "ready"; identity: DiscordGatewayIdentity }>
   | Readonly<{ type: "shard_resumed"; shardId: number }>
   | Readonly<{ type: "shard_disconnected"; shardId: number; closeCode: number | null }>
   | Readonly<{ type: "shard_reconnecting"; shardId: number }>
-  | Readonly<{ type: "provider_error"; code: "DISCORD_GATEWAY_ERROR" }>;
+  | Readonly<{
+      type: "provider_error";
+      code: "DISCORD_GATEWAY_ERROR";
+    }>
+  | Readonly<{
+      type: "runtime_degraded";
+      code: DiscordGatewayRuntimeCondition;
+    }>
+  | Readonly<{
+      type: "runtime_recovered";
+      code: DiscordGatewayRuntimeCondition;
+    }>;
 
 export type DiscordGatewayLifecycleListener = (
   event: DiscordGatewayLifecycleEvent,

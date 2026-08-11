@@ -171,9 +171,12 @@ describe("Node Discord adapter isolation", () => {
       const adapter = new NodeDiscordGatewayAdapter({
         botToken: TEST_TOKEN,
         intents: ["Guilds"],
+        listenerTimeoutMs: 100,
+        interactionTimeoutMs: 100,
+        maximumConcurrentInteractions: 1,
       });
       let interaction: DiscordInteraction | null = null;
-      adapter.subscribeInteractions((value) => {
+      const unsubscribeInteraction = adapter.subscribeInteractions((value) => {
         interaction = value;
       });
 
@@ -203,6 +206,7 @@ describe("Node Discord adapter isolation", () => {
       })();
 
       const interactionSecret = "INTERACTION_SECRET_THAT_MUST_NEVER_ESCAPE";
+      let providerReplyCalls = 0;
       const rawInteraction = {
         id: INTERACTION_ID,
         locale: "it",
@@ -228,6 +232,7 @@ describe("Node Discord adapter isolation", () => {
         isMessageComponent: () => true,
         isCommand: () => false,
         reply: async () => {
+          providerReplyCalls += 1;
           const providerError = new Error(`provider url contains ${interactionSecret}`) as Error & {
             url: string;
             requestBody: unknown;
@@ -253,6 +258,50 @@ describe("Node Discord adapter isolation", () => {
           return true;
         },
       );
+
+      unsubscribeInteraction();
+      let slowInteractionCalls = 0;
+      let stallInteractionRouter = true;
+      let releaseInteractionRouter!: () => void;
+      const degradedCodes: string[] = [];
+      const unsubscribeLifecycle = adapter.subscribeLifecycle((event) => {
+        if (event.type === "runtime_degraded" || event.type === "runtime_recovered") {
+          degradedCodes.push(`${event.type}:${event.code}`);
+        }
+      });
+      const unsubscribeSlowRouter = adapter.subscribeInteractions(async () => {
+        slowInteractionCalls += 1;
+        if (stallInteractionRouter) {
+          await new Promise<void>((resolve) => {
+            releaseInteractionRouter = resolve;
+          });
+        }
+      });
+      for (let index = 0; index < 4; index += 1) {
+        activeClient.emit(Events.InteractionCreate, rawInteraction as never);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(slowInteractionCalls, 1);
+      assert.ok(providerReplyCalls >= 2);
+      assert.deepEqual(degradedCodes, [
+        "runtime_degraded:DISCORD_INTERACTION_CAPACITY_EXHAUSTED",
+        "runtime_degraded:DISCORD_INTERACTION_ROUTER_QUARANTINED",
+        "runtime_recovered:DISCORD_INTERACTION_CAPACITY_EXHAUSTED",
+      ]);
+      stallInteractionRouter = false;
+      releaseInteractionRouter();
+      await nextTurn();
+      assert.deepEqual(degradedCodes, [
+        "runtime_degraded:DISCORD_INTERACTION_CAPACITY_EXHAUSTED",
+        "runtime_degraded:DISCORD_INTERACTION_ROUTER_QUARANTINED",
+        "runtime_recovered:DISCORD_INTERACTION_CAPACITY_EXHAUSTED",
+        "runtime_recovered:DISCORD_INTERACTION_ROUTER_QUARANTINED",
+      ]);
+      activeClient.emit(Events.InteractionCreate, rawInteraction as never);
+      await nextTurn();
+      assert.equal(slowInteractionCalls, 2);
+      unsubscribeSlowRouter();
+      unsubscribeLifecycle();
 
       let stopped = false;
       const stopping = adapter.stop().then(() => {
