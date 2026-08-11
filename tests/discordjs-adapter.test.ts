@@ -359,4 +359,169 @@ describe("Node Discord adapter isolation", () => {
       Object.defineProperty(Client.prototype, "isReady", readyDescriptor);
     }
   });
+
+  it("rebinds opaque provider extensions to each gateway client generation", async () => {
+    const loginDescriptor = Object.getOwnPropertyDescriptor(Client.prototype, "login");
+    const destroyDescriptor = Object.getOwnPropertyDescriptor(Client.prototype, "destroy");
+    const readyDescriptor = Object.getOwnPropertyDescriptor(Client.prototype, "isReady");
+    assert.ok(loginDescriptor);
+    assert.ok(destroyDescriptor);
+    assert.ok(readyDescriptor);
+
+    const timeline: string[] = [];
+    const clients = new Map<Client, number>();
+    let loginCalls = 0;
+
+    Object.defineProperty(Client.prototype, "isReady", {
+      ...readyDescriptor,
+      value(this: MutableTestClient): boolean {
+        return this.__testReady === true;
+      },
+    });
+    Object.defineProperty(Client.prototype, "login", {
+      ...loginDescriptor,
+      async value(this: MutableTestClient): Promise<string> {
+        loginCalls += 1;
+        (this as unknown as { user: unknown }).user = {
+          id: BOT_USER_ID,
+          username: "test-bot",
+          globalName: null,
+          displayAvatarURL: () => null,
+        };
+        (this as unknown as { application: unknown }).application = { id: APPLICATION_ID };
+        this.__testReady = true;
+        this.emit(Events.ClientReady, this as never);
+        return TEST_TOKEN;
+      },
+    });
+    Object.defineProperty(Client.prototype, "destroy", {
+      ...destroyDescriptor,
+      async value(this: MutableTestClient): Promise<void> {
+        timeline.push(`destroy:${clients.get(this) ?? "unbound"}`);
+        this.__testReady = false;
+      },
+    });
+
+    try {
+      const adapter = new NodeDiscordGatewayAdapter({
+        botToken: TEST_TOKEN,
+        intents: ["Guilds"],
+      });
+      const protocolSymbol = Symbol.for(
+        "@anto-project/discord-bot-core/provider-extension/v1",
+      );
+      const extension = {};
+      Object.defineProperty(extension, protocolSymbol, {
+        enumerable: false,
+        value: Object.freeze({
+          key: "test.extension",
+          bindProviderClient(providerClient: unknown, generation: number): void {
+            assert.ok(providerClient instanceof Client);
+            clients.set(providerClient, generation);
+            timeline.push(`bind:${generation}`);
+          },
+          async releaseProviderClient(
+            generation: number,
+            signal: AbortSignal,
+          ): Promise<void> {
+            assert.equal(signal.aborted, false);
+            timeline.push(`release:${generation}`);
+          },
+        }),
+      });
+
+      const dispose = adapter.registerProviderExtension(extension);
+      assert.deepEqual(timeline, ["bind:1"]);
+      await adapter.start();
+      assert.equal(loginCalls, 1);
+      assert.throws(
+        () => adapter.registerProviderExtension(extension),
+        /before the gateway lifecycle/iu,
+      );
+
+      await adapter.stop();
+      assert.deepEqual(timeline.slice(0, 3), ["bind:1", "release:1", "destroy:1"]);
+
+      await adapter.start();
+      assert.equal(loginCalls, 2);
+      assert.deepEqual(timeline.slice(3), ["bind:2"]);
+      assert.equal(new Set(clients.keys()).size, 2);
+      await adapter.stop();
+      assert.deepEqual(timeline.slice(3), ["bind:2", "release:2", "destroy:2"]);
+      await dispose();
+      await dispose();
+    } finally {
+      Object.defineProperty(Client.prototype, "login", loginDescriptor);
+      Object.defineProperty(Client.prototype, "destroy", destroyDescriptor);
+      Object.defineProperty(Client.prototype, "isReady", readyDescriptor);
+    }
+  });
+
+  it("rejects malformed and duplicate opaque provider extensions", async () => {
+    const adapter = new NodeDiscordGatewayAdapter({
+      botToken: TEST_TOKEN,
+      intents: ["Guilds"],
+    });
+    const protocolSymbol = Symbol.for(
+      "@anto-project/discord-bot-core/provider-extension/v1",
+    );
+    assert.throws(() => adapter.registerProviderExtension({}), /protocol is missing/iu);
+
+    const extension = {};
+    Object.defineProperty(extension, protocolSymbol, {
+      value: Object.freeze({
+        key: "test.duplicate",
+        bindProviderClient(): void {},
+        async releaseProviderClient(): Promise<void> {},
+      }),
+    });
+    const dispose = adapter.registerProviderExtension(extension);
+    assert.throws(
+      () => adapter.registerProviderExtension(extension),
+      /already registered/iu,
+    );
+    await dispose();
+  });
+
+  it("freezes provider extension registration when shutdown begins", async () => {
+    const adapter = new NodeDiscordGatewayAdapter({
+      botToken: TEST_TOKEN,
+      intents: ["Guilds"],
+    });
+    const protocolSymbol = Symbol.for(
+      "@anto-project/discord-bot-core/provider-extension/v1",
+    );
+    let release!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const extension = {};
+    Object.defineProperty(extension, protocolSymbol, {
+      value: Object.freeze({
+        key: "test.shutdown-race",
+        bindProviderClient(): void {},
+        async releaseProviderClient(): Promise<void> {
+          await releaseGate;
+        },
+      }),
+    });
+    adapter.registerProviderExtension(extension);
+
+    const stopping = adapter.stop();
+    assert.throws(
+      () =>
+        adapter.registerProviderExtension(
+          Object.defineProperty({}, protocolSymbol, {
+            value: Object.freeze({
+              key: "test.late-extension",
+              bindProviderClient(): void {},
+              async releaseProviderClient(): Promise<void> {},
+            }),
+          }),
+        ),
+      /before the gateway lifecycle/iu,
+    );
+    release();
+    await stopping;
+  });
 });

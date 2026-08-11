@@ -90,6 +90,7 @@ describe("discord bot core architecture", () => {
       gateway: { intents: ["Guilds"] },
     });
     assert.equal(runtime.commands, runtime.messages);
+    assert.equal(runtime.extensions, runtime.gateway);
     assert.doesNotMatch(JSON.stringify(runtime), /provider-token/u);
   });
 });

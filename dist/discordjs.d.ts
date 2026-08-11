@@ -26,7 +26,10 @@ export interface NodeDiscordGatewayOptions {
  * objects execute arbitrary getters and methods inside the provider boundary.
  */
 export declare const normalizeNodeDiscordInteraction: (value: unknown) => DiscordInteraction | null;
-export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort {
+export interface NodeDiscordProviderExtensionHostPort {
+    registerProviderExtension(extension: unknown): () => Promise<void>;
+}
+export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort {
     #private;
     constructor(options: NodeDiscordGatewayOptions);
     start(signal?: AbortSignal): Promise<DiscordGatewayIdentity>;
@@ -34,6 +37,7 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     isReady(): boolean;
     subscribeLifecycle(listener: DiscordGatewayLifecycleListener): () => void;
     subscribeInteractions(listener: DiscordInteractionListener): () => void;
+    registerProviderExtension(extension: unknown): () => Promise<void>;
     toJSON(): Readonly<{
         component: "node-discord-gateway-adapter";
     }>;
@@ -71,6 +75,7 @@ export interface NodeDiscordRuntimeOptions {
 }
 export type NodeDiscordRuntimeServices = Readonly<{
     gateway: DiscordGatewayRuntimePort;
+    extensions: NodeDiscordProviderExtensionHostPort;
     commands: DiscordApplicationCommandsRestPort;
     messages: DiscordMessageDeliveryPort;
 }>;
