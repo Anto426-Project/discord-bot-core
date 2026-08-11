@@ -27,7 +27,7 @@ export interface NodeDiscordGatewayOptions {
  */
 export declare const normalizeNodeDiscordInteraction: (value: unknown) => DiscordInteraction | null;
 export interface NodeDiscordProviderExtensionHostPort {
-    registerProviderExtension(extension: unknown): () => Promise<void>;
+    registerProviderExtension(extension: unknown): Promise<() => Promise<void>>;
 }
 export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort {
     #private;
@@ -37,7 +37,7 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     isReady(): boolean;
     subscribeLifecycle(listener: DiscordGatewayLifecycleListener): () => void;
     subscribeInteractions(listener: DiscordInteractionListener): () => void;
-    registerProviderExtension(extension: unknown): () => Promise<void>;
+    registerProviderExtension(extension: unknown): Promise<() => Promise<void>>;
     toJSON(): Readonly<{
         component: "node-discord-gateway-adapter";
     }>;

@@ -16,6 +16,8 @@ code consumes only the ports and immutable DTOs exported by this package.
 - safe provider receipts and redacted errors;
 - application-command projection and ownership-safe reconciliation;
 - explicit interaction and event routers;
+- an opaque, generation-aware provider-extension host for concrete technical
+  adapters such as music playback, without exposing the SDK client;
 - bounded runtime availability/degradation tracking.
 
 The package is stateless with respect to product domains. Credentials,
@@ -48,6 +50,9 @@ runtime communication between the two products.
 - Routers require explicit bindings; there is no dynamic discovery or
   catch-all handler.
 - Public declaration files contain no `discord.js` or `@discordjs/*` types.
+- Extensions register before lifecycle start, release before client destroy,
+  and remain quarantined after a failed or timed-out cleanup; a stale
+  generation can never be rebound over a cleanup still in flight.
 
 ## Submodule consumption
 

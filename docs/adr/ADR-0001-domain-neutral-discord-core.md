@@ -25,6 +25,12 @@ Low-level provider operations may be implemented by the core, while fan-out,
 destination selection, templates, localization, authorization and delivery
 policy remain in their owning product.
 
+Concrete provider extensions register through an opaque host port before the
+gateway lifecycle starts. The internal client is bound with a monotonic
+generation and released, with a deadline, before that generation is destroyed.
+Failed or incomplete release is quarantined and blocks rebinding; products
+never receive the client or the private extension protocol.
+
 The package is not a service. It has no service key, listener, database,
 runtime lease, diagnostics endpoint, environment reader or private key.
 Antobot and UniBot pin the package independently as a Git submodule and never

@@ -581,8 +581,10 @@ export class NodeDiscordGatewayAdapter {
             throw new DiscordCoreError("DISCORD_CANCELLED", "Discord gateway startup was cancelled.", false);
         }
         this.#extensionsFrozen = true;
-        if (this.#client.isReady() && !this.#stopRequested)
+        if (this.#client.isReady() && !this.#stopRequested) {
+            this.#assertProviderExtensionsReady();
             return this.#identity(this.#client);
+        }
         let shared = this.#startPromise;
         if (shared === null) {
             if (this.#providerLoginPromise !== null) {
@@ -597,6 +599,7 @@ export class NodeDiscordGatewayAdapter {
                 await this.#replaceStoppedClient();
                 this.#stopRequested = false;
             }
+            this.#assertProviderExtensionsReady();
             const controller = new AbortController();
             const pending = this.#startOnce(controller.signal);
             shared = pending;
@@ -609,6 +612,7 @@ export class NodeDiscordGatewayAdapter {
     async stop() {
         if (this.#stopPromise !== null)
             return this.#stopPromise;
+        this.#extensionsFrozen = true;
         const startup = this.#startPromise;
         const providerLogin = this.#providerLoginPromise;
         this.#stopRequested = true;
@@ -795,7 +799,7 @@ export class NodeDiscordGatewayAdapter {
     }
     registerProviderExtension(extension) {
         if (this.#extensionsFrozen) {
-            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extensions must be registered before gateway startup.", false);
+            throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extensions must be registered before the gateway lifecycle begins.", false);
         }
         if (this.#providerExtensions.size >= 8) {
             throw new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extension capacity was exceeded.", false);
@@ -808,32 +812,82 @@ export class NodeDiscordGatewayAdapter {
             owner: parsed.owner,
             protocol: parsed.protocol,
             boundGeneration: null,
+            releaseOperation: null,
+            releaseFailed: false,
+            removing: false,
         };
+        this.#providerExtensions.set(registered.protocol.key, registered);
         try {
-            registered.protocol.bindProviderClient(this.#client, this.#clientGeneration);
-            registered.boundGeneration = this.#clientGeneration;
+            this.#bindProviderExtension(registered, this.#client, this.#clientGeneration);
         }
         catch (error) {
-            throw error instanceof DiscordCoreError ? error : providerFailure(error);
+            registered.removing = true;
+            const failure = error instanceof DiscordCoreError
+                ? error
+                : new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extension configuration is invalid.", false);
+            return this.#releaseProviderExtension(registered).then(() => {
+                throw failure;
+            }, () => {
+                // A failed rollback remains registered and quarantined. A later stop
+                // retries it; the gateway never silently loses lifecycle ownership.
+                throw failure;
+            });
         }
-        this.#providerExtensions.set(registered.protocol.key, registered);
         let disposal = null;
-        return () => {
+        const dispose = () => {
             if (disposal !== null)
                 return disposal;
             if (this.#providerExtensions.get(registered.protocol.key) !== registered) {
                 disposal = Promise.resolve();
                 return disposal;
             }
-            this.#providerExtensions.delete(registered.protocol.key);
-            disposal = this.#releaseProviderExtension(registered);
+            registered.removing = true;
+            if (registered.boundGeneration === null &&
+                registered.releaseOperation === null) {
+                this.#providerExtensions.delete(registered.protocol.key);
+                disposal = Promise.resolve();
+                return disposal;
+            }
+            disposal = this.#releaseProviderExtension(registered).catch((error) => {
+                disposal = null;
+                throw error;
+            });
             return disposal;
         };
+        return Promise.resolve(dispose);
     }
     #bindProviderExtensions(client, generation) {
         for (const registered of this.#providerExtensions.values()) {
+            if (registered.removing ||
+                registered.releaseOperation !== null ||
+                registered.releaseFailed ||
+                registered.boundGeneration !== null) {
+                throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "A Discord provider extension from the previous generation is not released.", true);
+            }
+        }
+        for (const registered of this.#providerExtensions.values()) {
+            this.#bindProviderExtension(registered, client, generation);
+        }
+    }
+    #assertProviderExtensionsReady() {
+        for (const registered of this.#providerExtensions.values()) {
+            if (registered.removing ||
+                registered.releaseOperation !== null ||
+                registered.releaseFailed ||
+                registered.boundGeneration !== this.#clientGeneration) {
+                throw new DiscordCoreError("DISCORD_CIRCUIT_OPEN", "A Discord provider extension is not ready for the current gateway generation.", true);
+            }
+        }
+    }
+    #bindProviderExtension(registered, client, generation) {
+        registered.boundGeneration = generation;
+        try {
             registered.protocol.bindProviderClient(client, generation);
-            registered.boundGeneration = generation;
+        }
+        catch (error) {
+            throw error instanceof DiscordCoreError
+                ? error
+                : new DiscordCoreError("DISCORD_INVALID_INPUT", "Discord provider extension configuration is invalid.", false);
         }
     }
     async #releaseProviderExtensions(generation) {
@@ -848,19 +902,45 @@ export class NodeDiscordGatewayAdapter {
         const generation = registered.boundGeneration;
         if (generation === null)
             return;
-        registered.boundGeneration = null;
-        const controller = new AbortController();
+        let release = registered.releaseOperation;
+        let controller = null;
+        if (release === null) {
+            controller = new AbortController();
+            registered.releaseFailed = false;
+            const operation = Promise.resolve().then(() => registered.protocol.releaseProviderClient(generation, controller.signal));
+            let tracked;
+            tracked = operation.then(() => {
+                if (registered.releaseOperation !== tracked)
+                    return;
+                registered.releaseOperation = null;
+                registered.releaseFailed = false;
+                if (registered.boundGeneration === generation) {
+                    registered.boundGeneration = null;
+                }
+                if (registered.removing &&
+                    this.#providerExtensions.get(registered.protocol.key) === registered) {
+                    this.#providerExtensions.delete(registered.protocol.key);
+                }
+            }, (error) => {
+                if (registered.releaseOperation === tracked) {
+                    registered.releaseOperation = null;
+                    registered.releaseFailed = true;
+                }
+                throw error;
+            });
+            registered.releaseOperation = tracked;
+            release = tracked;
+        }
         let rejectTimeout;
         const timeoutPromise = new Promise((_resolve, reject) => {
             rejectTimeout = reject;
         });
         const timeout = setTimeout(() => {
-            controller.abort();
+            controller?.abort();
             rejectTimeout(new DiscordCoreError("DISCORD_TIMEOUT", "Discord provider extension shutdown exceeded its deadline.", true));
         }, this.#shutdownTimeoutMs);
         try {
-            const released = Promise.resolve().then(() => registered.protocol.releaseProviderClient(generation, controller.signal));
-            await Promise.race([released, timeoutPromise]);
+            await Promise.race([release, timeoutPromise]);
         }
         catch (error) {
             throw error instanceof DiscordCoreError ? error : providerFailure(error);
