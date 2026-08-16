@@ -4,7 +4,8 @@ import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublication
 import type { DiscordGatewayEventListener, DiscordGatewayEventPort } from "./gateway-events.js";
 import type { DiscordChannelMessageDelivery, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordMessageDeliveryPort } from "./delivery.js";
 import type { DiscordGatewayIdentity, DiscordGatewayLifecycleListener, DiscordGatewayRuntimePort } from "./gateway.js";
-import type { DiscordGuildDirectoryPort, DiscordGuildMemberListInput, DiscordGuildMemberPage, DiscordGuildRoleListInput, DiscordGuildRoleSnapshot } from "./guild-directory.js";
+import type { DiscordGuildDirectoryPort, DiscordGuildMemberListInput, DiscordGuildMemberPage, DiscordGuildMemberSnapshot, DiscordGuildRoleListInput, DiscordGuildRoleSnapshot } from "./guild-directory.js";
+import type { DiscordGuildChannelReadInput, DiscordGuildChannelSnapshot, DiscordGuildMemberReadInput, DiscordGuildResourcePort, DiscordGuildRoleReadInput, DiscordMemberRoleMutationInput, DiscordMemberRoleMutationReceipt } from "./guild-resources.js";
 import type { DiscordGatewayInspectionPort, DiscordGatewayInspectionSnapshot } from "./inspection.js";
 import type { DiscordInteraction, DiscordInteractionListener } from "./interactions.js";
 import type { DiscordBanMemberInput, DiscordDeleteRecentMessagesInput, DiscordKickMemberInput, DiscordMemberModerationReceipt, DiscordMessageCleanupReceipt, DiscordModerationActorFacts, DiscordModerationActorFactsInput, DiscordModerationChannelFactsInput, DiscordModerationMemberFacts, DiscordModerationMemberFactsInput, DiscordModerationPort, DiscordUnbanMemberInput } from "./moderation.js";
@@ -27,6 +28,8 @@ export interface NodeDiscordGatewayOptions {
     readonly interactionTimeoutMs?: number;
     readonly queryTimeoutMs?: number;
     readonly maximumConcurrentQueries?: number;
+    readonly memberRoleOperationLedgerCapacity?: number;
+    readonly memberRoleOperationLedgerTtlMs?: number;
     readonly maximumConcurrentInteractions?: number;
     readonly interactionOverloadContent?: string;
     readonly maximumGatewayEventListeners?: number;
@@ -62,7 +65,7 @@ export interface NodeDiscordProviderExtensionOptions {
  * callbacks and do not need to duplicate this implementation detail.
  */
 export declare const createNodeDiscordProviderExtension: (options: NodeDiscordProviderExtensionOptions) => unknown;
-export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort, DiscordGatewayInspectionPort, DiscordGuildDirectoryPort, DiscordProfileQueryPort, DiscordPresencePort, DiscordGatewayEventPort, DiscordModerationPort, DiscordBotAutoModPort, DiscordNativeAutoModPort, DiscordVoiceRoomPort {
+export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimePort, NodeDiscordProviderExtensionHostPort, DiscordGatewayInspectionPort, DiscordGuildDirectoryPort, DiscordGuildResourcePort, DiscordProfileQueryPort, DiscordPresencePort, DiscordGatewayEventPort, DiscordModerationPort, DiscordBotAutoModPort, DiscordNativeAutoModPort, DiscordVoiceRoomPort {
     #private;
     constructor(options: NodeDiscordGatewayOptions);
     start(signal?: AbortSignal): Promise<DiscordGatewayIdentity>;
@@ -74,6 +77,11 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     capture(): DiscordGatewayInspectionSnapshot;
     listRoles(input: DiscordGuildRoleListInput): Promise<readonly DiscordGuildRoleSnapshot[]>;
     listMembers(input: DiscordGuildMemberListInput): Promise<DiscordGuildMemberPage>;
+    readGuildMember(input: DiscordGuildMemberReadInput): Promise<DiscordGuildMemberSnapshot | null>;
+    readGuildRole(input: DiscordGuildRoleReadInput): Promise<DiscordGuildRoleSnapshot | null>;
+    readGuildChannel(input: DiscordGuildChannelReadInput): Promise<DiscordGuildChannelSnapshot | null>;
+    addRoleToMember(input: DiscordMemberRoleMutationInput): Promise<DiscordMemberRoleMutationReceipt>;
+    removeRoleFromMember(input: DiscordMemberRoleMutationInput): Promise<DiscordMemberRoleMutationReceipt>;
     readUser(input: DiscordUserProfileReadInput): Promise<DiscordUserProfile | null>;
     readMember(input: DiscordMemberProfileReadInput): Promise<DiscordMemberProfile | null>;
     readGuild(input: DiscordGuildProfileReadInput): Promise<DiscordGuildProfile | null>;
@@ -134,6 +142,7 @@ export type NodeDiscordRuntimeServices = Readonly<{
     extensions: NodeDiscordProviderExtensionHostPort;
     inspection: DiscordGatewayInspectionPort;
     guilds: DiscordGuildDirectoryPort;
+    guildResources: DiscordGuildResourcePort;
     profiles: DiscordProfileQueryPort;
     presence: DiscordPresencePort;
     events: DiscordGatewayEventPort;

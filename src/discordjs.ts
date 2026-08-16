@@ -26,6 +26,7 @@ import {
   type AutoModerationRule,
   type AutoModerationRuleCreateOptions,
   type Guild,
+  type GuildBasedChannel,
   type GuildMember,
   type GuildTextBasedChannel,
   type Interaction,
@@ -104,6 +105,16 @@ import type {
   DiscordGuildRoleListInput,
   DiscordGuildRoleSnapshot,
 } from "./guild-directory.js";
+import type {
+  DiscordGuildChannelKind,
+  DiscordGuildChannelReadInput,
+  DiscordGuildChannelSnapshot,
+  DiscordGuildMemberReadInput,
+  DiscordGuildResourcePort,
+  DiscordGuildRoleReadInput,
+  DiscordMemberRoleMutationInput,
+  DiscordMemberRoleMutationReceipt,
+} from "./guild-resources.js";
 import { parseDiscordSnowflake } from "./identifiers.js";
 import type {
   DiscordGatewayInspectionPort,
@@ -272,6 +283,8 @@ export interface NodeDiscordGatewayOptions {
   readonly interactionTimeoutMs?: number;
   readonly queryTimeoutMs?: number;
   readonly maximumConcurrentQueries?: number;
+  readonly memberRoleOperationLedgerCapacity?: number;
+  readonly memberRoleOperationLedgerTtlMs?: number;
   readonly maximumConcurrentInteractions?: number;
   readonly interactionOverloadContent?: string;
   readonly maximumGatewayEventListeners?: number;
@@ -479,6 +492,9 @@ const responseSnowflake = (value: unknown, label: string): string => {
     throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", `${label} is invalid.`, false);
   }
 };
+
+const responseNullableSnowflake = (value: unknown, label: string): string | null =>
+  value === null ? null : responseSnowflake(value, label);
 
 const responseTextValue = (
   value: unknown,
@@ -736,6 +752,67 @@ const memberSnapshot = (
   });
 };
 
+const guildChannelKind = (type: ChannelType): DiscordGuildChannelKind => {
+  switch (type) {
+    case ChannelType.GuildText:
+      return "text";
+    case ChannelType.GuildAnnouncement:
+      return "announcement";
+    case ChannelType.GuildForum:
+      return "forum";
+    case ChannelType.GuildMedia:
+      return "media";
+    case ChannelType.GuildVoice:
+      return "voice";
+    case ChannelType.GuildStageVoice:
+      return "stage_voice";
+    case ChannelType.GuildCategory:
+      return "category";
+    case ChannelType.AnnouncementThread:
+    case ChannelType.PublicThread:
+    case ChannelType.PrivateThread:
+      return "thread";
+    default:
+      return "other";
+  }
+};
+
+const guildChannelSnapshot = (
+  channel: GuildBasedChannel,
+  agent: GuildMember,
+  expectedGuildId: string,
+): DiscordGuildChannelSnapshot => {
+  const guildId = responseSnowflake(channel.guildId, "Discord channel guild id");
+  if (guildId !== expectedGuildId || channel.guild.id !== expectedGuildId) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord channel belongs to another guild.",
+      false,
+    );
+  }
+  if (agent.guild.id !== expectedGuildId) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord channel permission subject belongs to another guild.",
+      false,
+    );
+  }
+  const permissions = channel.permissionsFor(agent);
+  return Object.freeze({
+    guildId,
+    id: responseSnowflake(channel.id, "Discord channel id"),
+    name: responseTextValue(channel.name, 1, 100, "Discord channel name"),
+    kind: guildChannelKind(channel.type),
+    parentId: responseNullableSnowflake(channel.parentId, "Discord channel parent id"),
+    textBased: responseBoolean(channel.isTextBased(), "Discord channel text-based flag"),
+    voiceBased: responseBoolean(channel.isVoiceBased(), "Discord channel voice-based flag"),
+    agentCanView: permissions.has(PermissionFlagsBits.ViewChannel),
+    agentCanSendMessages: permissions.has(PermissionFlagsBits.SendMessages),
+    agentCanEmbedLinks: permissions.has(PermissionFlagsBits.EmbedLinks),
+    agentCanAttachFiles: permissions.has(PermissionFlagsBits.AttachFiles),
+  });
+};
+
 const inventoryEntry = (guild: Guild): DiscordGuildInventoryEntry =>
   Object.freeze({
     id: responseSnowflake(guild.id, "Discord guild id"),
@@ -973,6 +1050,19 @@ const inputDenseArray = <T>(
 
 const inputSignalFrom = (input: unknown, label: string): AbortSignal | undefined =>
   inputAbortSignal(inputDataProperty(input, "signal", `${label} signal`, true), `${label} signal`);
+
+const inputDeadlineEpochMsFrom = (input: unknown, label: string): number | undefined => {
+  const value = inputDataProperty(input, "deadlineEpochMs", `${label} deadline`, true);
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new DiscordCoreError(
+      "DISCORD_INVALID_INPUT",
+      `${label} deadline is invalid.`,
+      false,
+    );
+  }
+  return value as number;
+};
 
 const inputOperationId = (input: unknown, label: string): string =>
   inputTextValue(inputDataProperty(input, "operationId", label), 1, 256, label);
@@ -1279,6 +1369,105 @@ const fetchMemberOrNull = async (
   } catch (error: unknown) {
     if (isProviderNotFoundError(error)) return null;
     throw error;
+  }
+};
+
+const fetchGuildRoles = async (guild: Guild): Promise<ReadonlyMap<string, Role>> => {
+  const roles = await guild.roles.fetch();
+  if (roles.size > MAXIMUM_GUILD_ROLES) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_TOO_LARGE",
+      "Discord guild role collection exceeds its limit.",
+      false,
+    );
+  }
+  for (const [collectionId, role] of roles) {
+    if (collectionId !== role.id || role.guild.id !== guild.id) {
+      throw new DiscordCoreError(
+        "DISCORD_RESPONSE_INVALID",
+        "Discord guild role collection is inconsistent.",
+        false,
+      );
+    }
+  }
+  return roles;
+};
+
+const fetchGuildChannelOrNull = async (
+  guild: Guild,
+  channelId: string,
+): Promise<GuildBasedChannel | null> => {
+  try {
+    const channel = await guild.channels.fetch(channelId, { cache: true, force: true });
+    if (channel === null) return null;
+    if (channel.id !== channelId || channel.guildId !== guild.id || channel.guild.id !== guild.id) {
+      throw new DiscordCoreError(
+        "DISCORD_RESPONSE_INVALID",
+        "Discord channel response does not match the requested channel.",
+        false,
+      );
+    }
+    return channel;
+  } catch (error: unknown) {
+    if (isProviderNotFoundError(error)) return null;
+    throw error;
+  }
+};
+
+const guildResourceAgentUserId = (client: Client): string => {
+  if (client.user === null) {
+    throw new DiscordCoreError(
+      "DISCORD_CIRCUIT_OPEN",
+      "Discord guild resources are unavailable before gateway readiness.",
+      true,
+    );
+  }
+  return responseSnowflake(client.user.id, "Discord guild-resource agent id");
+};
+
+const denyMemberRoleMutation = (summary: string): never => {
+  throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", summary, false, 403);
+};
+
+const assertMemberRoleMutationAllowed = (
+  guild: Guild,
+  member: GuildMember,
+  agent: GuildMember,
+  role: Role,
+): void => {
+  if (
+    member.guild.id !== guild.id ||
+    agent.guild.id !== guild.id ||
+    role.guild.id !== guild.id
+  ) {
+    throw new DiscordCoreError(
+      "DISCORD_RESPONSE_INVALID",
+      "Discord member-role resources do not belong to one guild.",
+      false,
+    );
+  }
+  if (!agent.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    denyMemberRoleMutation("Discord agent lacks Manage Roles permission.");
+  }
+  if (role.id === guild.id) {
+    denyMemberRoleMutation("Discord @everyone role cannot be assigned or removed.");
+  }
+  if (responseBoolean(role.managed, "Discord role managed flag")) {
+    denyMemberRoleMutation("Discord managed role cannot be assigned or removed.");
+  }
+  const agentOwnsGuild = agent.id === guild.ownerId;
+  if (!agentOwnsGuild && agent.roles.highest.comparePositionTo(role) <= 0) {
+    denyMemberRoleMutation("Discord role is not below the agent role hierarchy.");
+  }
+  if (
+    member.id === guild.ownerId ||
+    member.id === agent.id ||
+    (!agentOwnsGuild && agent.roles.highest.comparePositionTo(member.roles.highest) <= 0)
+  ) {
+    denyMemberRoleMutation("Discord member is not below the agent role hierarchy.");
+  }
+  if (!responseBoolean(role.editable, "Discord role editable flag")) {
+    denyMemberRoleMutation("Discord role is not editable by the current agent.");
   }
 };
 
@@ -2409,12 +2598,19 @@ export const createNodeDiscordProviderExtension = (
   return Object.freeze(extension);
 };
 
+type MemberRoleOperationLedgerEntry = {
+  readonly fingerprint: string;
+  readonly expiresAtEpochMs: number;
+  receipt: DiscordMemberRoleMutationReceipt | null;
+};
+
 export class NodeDiscordGatewayAdapter
   implements
     DiscordGatewayRuntimePort,
     NodeDiscordProviderExtensionHostPort,
     DiscordGatewayInspectionPort,
     DiscordGuildDirectoryPort,
+    DiscordGuildResourcePort,
     DiscordProfileQueryPort,
     DiscordPresencePort,
     DiscordGatewayEventPort,
@@ -2437,6 +2633,9 @@ export class NodeDiscordGatewayAdapter
   readonly #interactionTimeoutMs: number;
   readonly #queryTimeoutMs: number;
   readonly #maximumConcurrentQueries: number;
+  readonly #memberRoleOperationLedgerCapacity: number;
+  readonly #memberRoleOperationLedgerTtlMs: number;
+  readonly #memberRoleOperationLedger = new Map<string, MemberRoleOperationLedgerEntry>();
   readonly #maximumConcurrentInteractions: number;
   readonly #interactionOverloadContent: string;
   readonly #maximumGatewayEventListeners: number;
@@ -2539,6 +2738,20 @@ export class NodeDiscordGatewayAdapter
       1,
       256,
       "maximumConcurrentQueries",
+    );
+    this.#memberRoleOperationLedgerCapacity = boundedInteger(
+      options.memberRoleOperationLedgerCapacity,
+      4_096,
+      1,
+      65_536,
+      "memberRoleOperationLedgerCapacity",
+    );
+    this.#memberRoleOperationLedgerTtlMs = boundedInteger(
+      options.memberRoleOperationLedgerTtlMs,
+      900_000,
+      1_000,
+      86_400_000,
+      "memberRoleOperationLedgerTtlMs",
     );
     this.#maximumConcurrentInteractions = boundedInteger(
       options.maximumConcurrentInteractions,
@@ -3241,14 +3454,7 @@ export class NodeDiscordGatewayAdapter
           false,
         );
       }
-      const collection = await guild.roles.fetch();
-      if (collection.size > MAXIMUM_GUILD_ROLES) {
-        throw new DiscordCoreError(
-          "DISCORD_RESPONSE_TOO_LARGE",
-          "Discord guild role collection exceeds its limit.",
-          false,
-        );
-      }
+      const collection = await fetchGuildRoles(guild);
       const roles: DiscordGuildRoleSnapshot[] = [];
       const ids = new Set<string>();
       for (const [collectionId, role] of collection) {
@@ -3346,6 +3552,222 @@ export class NodeDiscordGatewayAdapter
         nextAfter,
       });
     });
+  }
+
+  public async readGuildMember(
+    input: DiscordGuildMemberReadInput,
+  ): Promise<DiscordGuildMemberSnapshot | null> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord guild-member input"),
+      "Discord guild id",
+    );
+    const userId = inputSnowflake(
+      inputDataProperty(input, "userId", "Discord guild-member input"),
+      "Discord member user id",
+    );
+    const signal = inputSignalFrom(input, "Discord guild-member read");
+    const deadlineEpochMs = inputDeadlineEpochMsFrom(input, "Discord guild-member read");
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      const guild = await resolveGuild(client, guildId);
+      await fetchGuildRoles(guild);
+      const member = await fetchMemberOrNull(guild, userId);
+      return member === null ? null : memberSnapshot(member, guildId);
+    }, "read", deadlineEpochMs);
+  }
+
+  public async readGuildRole(
+    input: DiscordGuildRoleReadInput,
+  ): Promise<DiscordGuildRoleSnapshot | null> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord guild-role input"),
+      "Discord guild id",
+    );
+    const roleId = inputSnowflake(
+      inputDataProperty(input, "roleId", "Discord guild-role input"),
+      "Discord role id",
+    );
+    const signal = inputSignalFrom(input, "Discord guild-role read");
+    const deadlineEpochMs = inputDeadlineEpochMsFrom(input, "Discord guild-role read");
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      const guild = await resolveGuild(client, guildId);
+      const roles = await fetchGuildRoles(guild);
+      const agent = await fetchMemberOrNull(guild, guildResourceAgentUserId(client));
+      if (agent === null) {
+        throw new DiscordCoreError(
+          "DISCORD_PROVIDER_FAILURE",
+          "Discord guild-resource agent is unavailable.",
+          false,
+          404,
+        );
+      }
+      const role = roles.get(roleId) ?? null;
+      return role === null ? null : roleSnapshot(role, guildId);
+    }, "read", deadlineEpochMs);
+  }
+
+  public async readGuildChannel(
+    input: DiscordGuildChannelReadInput,
+  ): Promise<DiscordGuildChannelSnapshot | null> {
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord guild-channel input"),
+      "Discord guild id",
+    );
+    const channelId = inputSnowflake(
+      inputDataProperty(input, "channelId", "Discord guild-channel input"),
+      "Discord channel id",
+    );
+    const signal = inputSignalFrom(input, "Discord guild-channel read");
+    const deadlineEpochMs = inputDeadlineEpochMsFrom(input, "Discord guild-channel read");
+    return this.#runCurrentClientOperation(signal, async (client) => {
+      const guild = await resolveGuild(client, guildId);
+      await fetchGuildRoles(guild);
+      const agentUserId = guildResourceAgentUserId(client);
+      const [channel, agent] = await Promise.all([
+        fetchGuildChannelOrNull(guild, channelId),
+        fetchMemberOrNull(guild, agentUserId),
+      ]);
+      if (channel === null) return null;
+      if (agent === null) {
+        throw new DiscordCoreError(
+          "DISCORD_PROVIDER_FAILURE",
+          "Discord guild-resource agent is unavailable.",
+          false,
+          404,
+        );
+      }
+      return guildChannelSnapshot(channel, agent, guildId);
+    }, "read", deadlineEpochMs);
+  }
+
+  public addRoleToMember(
+    input: DiscordMemberRoleMutationInput,
+  ): Promise<DiscordMemberRoleMutationReceipt> {
+    return this.#mutateMemberRole(input, "add");
+  }
+
+  public removeRoleFromMember(
+    input: DiscordMemberRoleMutationInput,
+  ): Promise<DiscordMemberRoleMutationReceipt> {
+    return this.#mutateMemberRole(input, "remove");
+  }
+
+  async #mutateMemberRole(
+    input: DiscordMemberRoleMutationInput,
+    action: "add" | "remove",
+  ): Promise<DiscordMemberRoleMutationReceipt> {
+    const operationId = inputOperationId(input, "Discord member-role operation id");
+    const guildId = inputSnowflake(
+      inputDataProperty(input, "guildId", "Discord member-role input"),
+      "Discord guild id",
+    );
+    const userId = inputSnowflake(
+      inputDataProperty(input, "userId", "Discord member-role input"),
+      "Discord member user id",
+    );
+    const roleId = inputSnowflake(
+      inputDataProperty(input, "roleId", "Discord member-role input"),
+      "Discord role id",
+    );
+    const auditReason = inputAuditReason(input, "Discord member-role audit reason");
+    const signal = inputSignalFrom(input, "Discord member-role mutation");
+    const deadlineEpochMs = inputDeadlineEpochMsFrom(input, "Discord member-role mutation");
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify([action, guildId, userId, roleId, auditReason]), "utf8")
+      .digest("hex");
+    const existing = this.#memberRoleLedgerEntry(operationId, fingerprint);
+    if (existing.receipt !== null) {
+      return this.#runCurrentClientOperation(
+        signal,
+        () => existing.receipt as DiscordMemberRoleMutationReceipt,
+        "read",
+        deadlineEpochMs,
+      );
+    }
+    const receipt = Object.freeze({
+      operationId,
+      status: "satisfied" as const,
+      action,
+      guildId,
+      userId,
+      roleId,
+    });
+    const resolved = await this.#runCurrentClientMutation(signal, async (client) => {
+      const guild = await resolveGuild(client, guildId);
+      const roles = await fetchGuildRoles(guild);
+      const agentUserId = guildResourceAgentUserId(client);
+      const [member, agent] = await Promise.all([
+        fetchMemberOrNull(guild, userId),
+        fetchMemberOrNull(guild, agentUserId),
+      ]);
+      const role = roles.get(roleId) ?? null;
+      if (member === null || agent === null || role === null) {
+        throw new DiscordCoreError(
+          "DISCORD_PROVIDER_FAILURE",
+          "Discord member-role resource is unavailable.",
+          false,
+          404,
+        );
+      }
+      assertMemberRoleMutationAllowed(guild, member, agent, role);
+      const currentlyAssigned = member.roles.cache.has(roleId);
+      if ((action === "add" && currentlyAssigned) || (action === "remove" && !currentlyAssigned)) {
+        return receipt;
+      }
+      const updated = action === "add"
+        ? await member.roles.add(roleId, auditReason)
+        : await member.roles.remove(roleId, auditReason);
+      if (updated.id !== userId || updated.guild.id !== guildId) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord member-role mutation response is inconsistent.",
+          false,
+        );
+      }
+      const assignedAfterMutation = updated.roles.cache.has(roleId);
+      if ((action === "add") !== assignedAfterMutation) {
+        throw new DiscordCoreError(
+          "DISCORD_RESPONSE_INVALID",
+          "Discord member-role mutation did not satisfy the requested state.",
+          false,
+        );
+      }
+      return receipt;
+    }, deadlineEpochMs);
+    existing.receipt = resolved;
+    return resolved;
+  }
+
+  #memberRoleLedgerEntry(
+    operationId: string,
+    fingerprint: string,
+  ): MemberRoleOperationLedgerEntry {
+    const now = Date.now();
+    for (const [key, entry] of this.#memberRoleOperationLedger) {
+      if (entry.expiresAtEpochMs <= now) this.#memberRoleOperationLedger.delete(key);
+    }
+    const retained = this.#memberRoleOperationLedger.get(operationId);
+    if (retained !== undefined) {
+      if (retained.fingerprint !== fingerprint) {
+        throw new DiscordCoreError(
+          "DISCORD_INVALID_INPUT",
+          "Discord member-role operation id was reused with different input.",
+          false,
+        );
+      }
+      return retained;
+    }
+    while (this.#memberRoleOperationLedger.size >= this.#memberRoleOperationLedgerCapacity) {
+      const oldest = this.#memberRoleOperationLedger.keys().next().value;
+      if (oldest === undefined) break;
+      this.#memberRoleOperationLedger.delete(oldest);
+    }
+    const created: MemberRoleOperationLedgerEntry = {
+      fingerprint,
+      expiresAtEpochMs: now + this.#memberRoleOperationLedgerTtlMs,
+      receipt: null,
+    };
+    this.#memberRoleOperationLedger.set(operationId, created);
+    return created;
   }
 
   public async readUser(input: DiscordUserProfileReadInput): Promise<DiscordUserProfile | null> {
@@ -4391,9 +4813,17 @@ export class NodeDiscordGatewayAdapter
     signal: AbortSignal | undefined,
     operation: (client: Client) => T | Promise<T>,
     operationKind: "read" | "mutation" = "read",
+    deadlineEpochMs?: number,
   ): Promise<T> {
     if (signal?.aborted === true) {
       throw new DiscordCoreError("DISCORD_CANCELLED", "Discord operation was cancelled.", false);
+    }
+    if (deadlineEpochMs !== undefined && deadlineEpochMs <= Date.now()) {
+      throw new DiscordCoreError(
+        "DISCORD_TIMEOUT",
+        "Discord operation exceeded its deadline before dispatch.",
+        true,
+      );
     }
     const client = this.#client;
     const generation = this.#clientGeneration;
@@ -4428,6 +4858,13 @@ export class NodeDiscordGatewayAdapter
         if (signal?.aborted === true || lifecycleSignal.aborted) {
           throw interrupted("Discord operation was cancelled before dispatch.");
         }
+        if (deadlineEpochMs !== undefined && deadlineEpochMs <= Date.now()) {
+          throw new DiscordCoreError(
+            "DISCORD_TIMEOUT",
+            "Discord operation exceeded its deadline before dispatch.",
+            true,
+          );
+        }
         dispatched = true;
         return operation(client);
       })
@@ -4448,6 +4885,9 @@ export class NodeDiscordGatewayAdapter
       rejectBoundary(interrupted("Discord gateway generation stopped."));
     signal?.addEventListener("abort", onCallerAbort, { once: true });
     lifecycleSignal.addEventListener("abort", onLifecycleAbort, { once: true });
+    const timeoutMs = deadlineEpochMs === undefined
+      ? this.#queryTimeoutMs
+      : Math.max(1, Math.min(this.#queryTimeoutMs, deadlineEpochMs - Date.now()));
     const timeout = setTimeout(
       () =>
         rejectBoundary(
@@ -4463,7 +4903,7 @@ export class NodeDiscordGatewayAdapter
                 true,
               ),
         ),
-      this.#queryTimeoutMs,
+      timeoutMs,
     );
     try {
       const result = await Promise.race([providerOperation, boundary]);
@@ -4511,8 +4951,9 @@ export class NodeDiscordGatewayAdapter
   #runCurrentClientMutation<T>(
     signal: AbortSignal | undefined,
     operation: (client: Client) => T | Promise<T>,
+    deadlineEpochMs?: number,
   ): Promise<T> {
-    return this.#runCurrentClientOperation(signal, operation, "mutation");
+    return this.#runCurrentClientOperation(signal, operation, "mutation", deadlineEpochMs);
   }
 
   public registerProviderExtension(
@@ -5270,6 +5711,7 @@ export type NodeDiscordRuntimeServices = Readonly<{
   extensions: NodeDiscordProviderExtensionHostPort;
   inspection: DiscordGatewayInspectionPort;
   guilds: DiscordGuildDirectoryPort;
+  guildResources: DiscordGuildResourcePort;
   profiles: DiscordProfileQueryPort;
   presence: DiscordPresencePort;
   events: DiscordGatewayEventPort;
@@ -5315,6 +5757,7 @@ export const createNodeDiscordRuntime = (
     extensions: gateway,
     inspection: gateway,
     guilds: gateway,
+    guildResources: gateway,
     profiles: gateway,
     presence: gateway,
     events: gateway,

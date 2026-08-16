@@ -10,6 +10,7 @@ export * from "./events.js";
 export * from "./gateway.js";
 export * from "./gateway-events.js";
 export * from "./guild-directory.js";
+export * from "./guild-resources.js";
 export * from "./identifiers.js";
 export * from "./inspection.js";
 export * from "./interactions.js";

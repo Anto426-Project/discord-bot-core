@@ -3,41 +3,59 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const temporary = mkdtempSync(path.join(tmpdir(), "discord-bot-core-smoke-"));
+const npmEnvironment = Object.freeze({
+  ...process.env,
+  npm_config_cache: path.join(temporary, "npm-cache"),
+});
+const localProviderSdk = path.resolve("node_modules", "discord.js");
+const seedLocalProviderSdk = (consumer) => {
+  const modules = path.join(consumer, "node_modules");
+  mkdirSync(modules, { recursive: true });
+  symlinkSync(localProviderSdk, path.join(modules, "discord.js"), "dir");
+};
 
 try {
-  const packed = JSON.parse(
-    execFileSync(
-      "npm",
-      ["pack", "--json", "--pack-destination", temporary],
-      { cwd: process.cwd(), encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
-    ),
-  );
+  const packOutput = execFileSync(
+    "npm",
+    ["pack", "--json", "--pack-destination", temporary],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: npmEnvironment,
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  ).trim();
+  const packed = packOutput.length === 0 ? null : JSON.parse(packOutput);
   const metadata = Array.isArray(packed)
     ? packed[0]
     : packed !== null && typeof packed === "object"
       ? Object.values(packed)[0]
       : undefined;
-  const filename = metadata?.filename;
+  const filename = metadata?.filename ??
+    readdirSync(temporary).find((entry) => entry.endsWith(".tgz"));
   if (typeof filename !== "string") throw new Error("npm pack did not return a tarball.");
   const tarball = path.join(temporary, filename);
   const consumer = path.join(temporary, "consumer");
-  execFileSync("mkdir", [consumer]);
+  mkdirSync(consumer);
   writeFileSync(
     path.join(consumer, "package.json"),
     JSON.stringify({ name: "discord-core-smoke-consumer", private: true, type: "module" }),
   );
+  seedLocalProviderSdk(consumer);
   execFileSync(
     "npm",
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
-    { cwd: consumer, stdio: "inherit" },
+    ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    { cwd: consumer, env: npmEnvironment, stdio: "inherit" },
   );
   writeFileSync(
     path.join(consumer, "smoke.mjs"),
@@ -74,6 +92,7 @@ try {
       if (
         runtime.inspection !== runtime.gateway ||
         runtime.guilds !== runtime.gateway ||
+        runtime.guildResources !== runtime.gateway ||
         runtime.profiles !== runtime.gateway ||
         runtime.presence !== runtime.gateway ||
         runtime.events !== runtime.gateway ||
@@ -111,6 +130,10 @@ try {
   for (const entry of ["package.json", "README.md", "dist"]) {
     cpSync(path.resolve(entry), path.join(rawSource, entry), { recursive: true });
   }
+  const rawManifestPath = path.join(rawSource, "package.json");
+  const rawManifest = JSON.parse(readFileSync(rawManifestPath, "utf8"));
+  delete rawManifest.devDependencies;
+  writeFileSync(rawManifestPath, JSON.stringify(rawManifest));
   for (const entry of ["package.json", "README.md", "dist"]) {
     cpSync(
       path.resolve("vendor", "dynamic-embed-engine", entry),
@@ -128,10 +151,18 @@ try {
       dependencies: { "@anto-project/discord-bot-core": "workspace:*" },
     }),
   );
+  seedLocalProviderSdk(rawConsumer);
   execFileSync(
     "npm",
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
-    { cwd: rawConsumer, stdio: "inherit" },
+    [
+      "install",
+      "--offline",
+      "--omit=dev",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+    ],
+    { cwd: rawConsumer, env: npmEnvironment, stdio: "inherit" },
   );
   writeFileSync(
     path.join(rawConsumer, "smoke.mjs"),

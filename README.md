@@ -19,7 +19,8 @@ code consumes only the ports and immutable DTOs exported by this package.
 - application-command projection and ownership-safe reconciliation;
 - explicit interaction and event routers;
 - generation-scoped gateway inspection, bounded guild/member directory reads,
-  immutable profile projections and presence control;
+  live member/role/channel facts, guarded single-role effects, immutable profile
+  projections and presence control;
 - provider-neutral gateway events that never expose message content, plus
   technical moderation, native/bot AutoMod and voice-room effect ports;
 - an opaque, generation-aware provider-extension host for concrete technical
@@ -79,8 +80,12 @@ runtime communication between the two products.
   acknowledgement window. At capacity, the core sends one bounded ephemeral
   overload response. Listener/router quarantine, overload and their recovery
   are surfaced explicitly through lifecycle events.
-- Mutation `operationId` values are correlation keys owned by the product, not
-  a claim of provider idempotency. Cancellation or timeout after dispatch is
+- Single-role effects use Discord's idempotent PUT/DELETE routes, reconcile the
+  live member state before writing and reject `@everyone`, managed, foreign or
+  hierarchy-protected roles. A bounded TTL ledger rejects ambiguous
+  `operationId` reuse while retained and returns the same immutable receipt.
+- Other mutation `operationId` values remain correlation keys rather than a
+  claim of provider idempotency. Cancellation or timeout after dispatch is
   reported as non-retryable `DISCORD_OUTCOME_UNKNOWN`; the product must
   reconcile durable intent with provider state before issuing another effect.
 

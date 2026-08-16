@@ -105,6 +105,7 @@ describe("discord bot core architecture", () => {
     assert.equal(runtime.extensions, runtime.gateway);
     assert.equal(runtime.inspection, runtime.gateway);
     assert.equal(runtime.guilds, runtime.gateway);
+    assert.equal(runtime.guildResources, runtime.gateway);
     assert.equal(runtime.profiles, runtime.gateway);
     assert.equal(runtime.presence, runtime.gateway);
     assert.equal(runtime.events, runtime.gateway);
@@ -113,6 +114,15 @@ describe("discord bot core architecture", () => {
     assert.equal(runtime.nativeAutoMod, runtime.gateway);
     assert.equal(runtime.voiceRooms, runtime.gateway);
     assert.doesNotMatch(JSON.stringify(runtime), /provider-token/u);
+  });
+
+  it("publishes closed guild-resource contracts with deadlines and no provider client", async () => {
+    const declarations = await readFile(path.resolve("dist/guild-resources.d.ts"), "utf8");
+    assert.match(declarations, /interface DiscordGuildResourcePort/u);
+    assert.match(declarations, /deadlineEpochMs\?: number/u);
+    assert.match(declarations, /agentCanSendMessages: boolean/u);
+    assert.match(declarations, /status: "satisfied"/u);
+    assert.doesNotMatch(declarations, /discord\.js|\bClient\b/iu);
   });
 
   it("keeps the provider extension bridge opaque in public declarations", async () => {
