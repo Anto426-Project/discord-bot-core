@@ -18,9 +18,10 @@ code consumes only the ports and immutable DTOs exported by this package.
 - safe provider receipts and redacted errors;
 - application-command projection and ownership-safe reconciliation;
 - explicit interaction and event routers;
-- generation-scoped gateway inspection, bounded guild/member directory reads,
-  live member/role/channel facts, guarded single-role effects, immutable profile
-  projections and presence control;
+- generation-scoped gateway inspection with validated guild locale and join-time
+  inventory, bounded guild/member directory reads, live member/role/channel
+  facts, guarded single-role effects, immutable profile projections and presence
+  control;
 - provider-neutral gateway events that never expose message content, plus
   technical moderation, native/bot AutoMod and voice-room effect ports;
 - an opaque, generation-aware provider-extension host for concrete technical

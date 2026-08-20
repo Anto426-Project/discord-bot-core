@@ -1,8 +1,10 @@
 export type DiscordGuildInventoryEntry = Readonly<{
   id: string;
   name: string;
+  preferredLocale: string;
   shardId: number;
   memberCount: number;
+  joinedAt: string | null;
 }>;
 
 export type DiscordGatewayInspectionSnapshot = Readonly<{

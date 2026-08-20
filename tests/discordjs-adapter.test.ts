@@ -970,10 +970,12 @@ describe("Node Discord adapter isolation", () => {
       Object.assign(guild, {
         id: guildId,
         name: "Test Guild",
+        preferredLocale: "en-US",
         description: "A bounded guild profile",
         ownerId: USER_ID,
         shardId: 0,
         memberCount: 1,
+        joinedAt,
         premiumTier: 1,
         premiumSubscriptionCount: 2,
         createdAt,
@@ -1016,10 +1018,37 @@ describe("Node Discord adapter isolation", () => {
       assert.equal(inspection.textChannelCount, 1);
       assert.equal(inspection.voiceChannelCount, 1);
       assert.deepEqual(inspection.guilds, [
-        { id: guildId, name: "Test Guild", shardId: 0, memberCount: 1 },
+        {
+          id: guildId,
+          name: "Test Guild",
+          preferredLocale: "en-US",
+          shardId: 0,
+          memberCount: 1,
+          joinedAt: joinedAt.toISOString(),
+        },
       ]);
       assert.ok(Object.isFrozen(inspection));
       assert.ok(Object.isFrozen(inspection.guilds));
+      assert.ok(Object.isFrozen(inspection.guilds[0]));
+
+      const safePreferredLocale = guild.preferredLocale;
+      guild.preferredLocale = "x";
+      assert.throws(
+        () => runtime.inspection.capture(),
+        (error: unknown) =>
+          error instanceof DiscordCoreError && error.code === "DISCORD_RESPONSE_INVALID",
+      );
+      guild.preferredLocale = safePreferredLocale;
+      const safeGuildJoinedAt = guild.joinedAt;
+      guild.joinedAt = new Date(Number.NaN);
+      assert.throws(
+        () => runtime.inspection.capture(),
+        (error: unknown) =>
+          error instanceof DiscordCoreError && error.code === "DISCORD_RESPONSE_INVALID",
+      );
+      guild.joinedAt = null;
+      assert.equal(runtime.inspection.capture().guilds[0]?.joinedAt, null);
+      guild.joinedAt = safeGuildJoinedAt;
 
       const listedRoles = await runtime.guilds.listRoles({ guildId });
       assert.deepEqual(listedRoles.map((entry) => entry.id), [guildId, roleId]);
@@ -1106,6 +1135,8 @@ describe("Node Discord adapter isolation", () => {
       const guildProfile = await runtime.profiles.readGuild({ guildId, mode: "cache" });
       assert.equal(guildProfile?.ownerId, USER_ID);
       assert.equal(guildProfile?.banner, null);
+      assert.equal(Object.hasOwn(guildProfile ?? {}, "preferredLocale"), false);
+      assert.equal(Object.hasOwn(guildProfile ?? {}, "joinedAt"), false);
       assert.equal(
         guildProfile?.icon?.urls.png?.[1_024],
         `https://cdn.discordapp.com/icons/${guildId}/icon.png?size=1024`,

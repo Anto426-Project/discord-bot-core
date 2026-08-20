@@ -817,6 +817,12 @@ const inventoryEntry = (guild: Guild): DiscordGuildInventoryEntry =>
   Object.freeze({
     id: responseSnowflake(guild.id, "Discord guild id"),
     name: responseTextValue(guild.name, 1, 100, "Discord guild name"),
+    preferredLocale: responseTextValue(
+      guild.preferredLocale,
+      2,
+      32,
+      "Discord guild preferred locale",
+    ),
     shardId: responseBoundedInteger(guild.shardId, 0, 4_095, "Discord guild shard id"),
     memberCount: responseBoundedInteger(
       guild.memberCount,
@@ -824,6 +830,7 @@ const inventoryEntry = (guild: Guild): DiscordGuildInventoryEntry =>
       MAXIMUM_GUILD_MEMBERS,
       "Discord guild member count",
     ),
+    joinedAt: responseNullableTimestamp(guild.joinedAt, "Discord guild join timestamp"),
   });
 
 const userProfile = (user: User): DiscordUserProfile =>
@@ -869,10 +876,17 @@ const memberProfile = (member: GuildMember, expectedGuildId: string): DiscordMem
   });
 };
 
-const guildProfile = (guild: Guild): DiscordGuildProfile => {
-  const inventory = inventoryEntry(guild);
-  return Object.freeze({
-    ...inventory,
+const guildProfile = (guild: Guild): DiscordGuildProfile =>
+  Object.freeze({
+    id: responseSnowflake(guild.id, "Discord guild id"),
+    name: responseTextValue(guild.name, 1, 100, "Discord guild name"),
+    shardId: responseBoundedInteger(guild.shardId, 0, 4_095, "Discord guild shard id"),
+    memberCount: responseBoundedInteger(
+      guild.memberCount,
+      0,
+      MAXIMUM_GUILD_MEMBERS,
+      "Discord guild member count",
+    ),
     ownerId: responseSnowflake(guild.ownerId, "Discord guild owner id"),
     description: responseNullableTextValue(guild.description, 4_096, "Discord guild description"),
     premiumTier: responseBoundedInteger(guild.premiumTier, 0, 3, "Discord guild premium tier"),
@@ -893,7 +907,6 @@ const guildProfile = (guild: Guild): DiscordGuildProfile => {
       guild.splashURL({ extension: format, size, forceStatic: true }),
     ),
   });
-};
 
 const PRESENCE_ACTIVITY_TYPES: Readonly<Record<DiscordPresenceActivityType, ActivityType>> =
   Object.freeze({
