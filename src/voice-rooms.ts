@@ -107,8 +107,10 @@ export type DiscordVoiceGeneratorProvisionReceipt = Readonly<{
 export type DiscordVoiceGeneratorDeprovisionInput = Readonly<{
   operationId: string;
   guildId: string;
-  generatorChannelId?: string;
-  categoryChannelId?: string;
+  generatorChannelId?: string | null;
+  categoryChannelId?: string | null;
+  channelName?: string;
+  categoryName?: string;
   auditReason: string;
   signal?: AbortSignal;
 }>;

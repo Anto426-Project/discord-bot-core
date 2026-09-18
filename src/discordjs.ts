@@ -4694,17 +4694,41 @@ export class NodeDiscordGatewayAdapter
       "Discord voice generator deprovision audit reason",
     );
     const signal = inputSignalFrom(input, "Discord voice generator deprovision");
+    const channelName = input.channelName?.trim() || "➕ Crea Stanza";
+    const categoryName = input.categoryName?.trim() || "🔊 Canali Temporanei";
 
     return this.#runCurrentClientMutation(signal, async (client) => {
       const guild = await resolveGuild(client, guildId);
+      await guild.channels.fetch();
+
+      let generatorDeleted = false;
       if (input.generatorChannelId) {
         try {
           const ch = await guild.channels.fetch(input.generatorChannelId);
-          if (ch) await ch.delete(auditReason);
+          if (ch) {
+            await ch.delete(auditReason);
+            generatorDeleted = true;
+          }
         } catch {
           // Channel already deleted
         }
       }
+      if (!generatorDeleted) {
+        const fallbackChannel = guild.channels.cache.find(
+          (c) =>
+            c.type === ChannelType.GuildVoice &&
+            c.name.toLowerCase() === channelName.toLowerCase(),
+        );
+        if (fallbackChannel) {
+          try {
+            await fallbackChannel.delete(auditReason);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      let categoryDeleted = false;
       if (input.categoryChannelId) {
         try {
           const cat = await guild.channels.fetch(input.categoryChannelId);
@@ -4715,12 +4739,34 @@ export class NodeDiscordGatewayAdapter
             );
             if (children.size === 0) {
               await cat.delete(auditReason);
+              categoryDeleted = true;
             }
           }
         } catch {
           // Category already deleted
         }
       }
+      if (!categoryDeleted) {
+        const fallbackCategory = guild.channels.cache.find(
+          (c) =>
+            c.type === ChannelType.GuildCategory &&
+            c.name.toLowerCase() === categoryName.toLowerCase(),
+        );
+        if (fallbackCategory && fallbackCategory.type === ChannelType.GuildCategory) {
+          await guild.channels.fetch();
+          const children = guild.channels.cache.filter(
+            (c) => c.parentId === fallbackCategory.id,
+          );
+          if (children.size === 0) {
+            try {
+              await fallbackCategory.delete(auditReason);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+
       return Object.freeze({
         operationId,
         status: "applied",
