@@ -46,6 +46,7 @@ export type DiscordGuildProfile = Readonly<{
   premiumTier: number;
   premiumSubscriptionCount: number;
   createdAt: string;
+  rulesChannelId: string | null;
   icon: DiscordImageAsset | null;
   banner: DiscordImageAsset | null;
   splash: DiscordImageAsset | null;

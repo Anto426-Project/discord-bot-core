@@ -912,6 +912,10 @@ const guildProfile = (guild: Guild): DiscordGuildProfile =>
       "Discord guild premium subscription count",
     ),
     createdAt: responseTimestamp(guild.createdAt, "Discord guild creation timestamp"),
+    rulesChannelId: responseNullableSnowflake(
+      guild.rulesChannelId ?? null,
+      "Discord guild rules channel id",
+    ),
     icon: materializeImageAsset((format, size) =>
       guild.iconURL({ extension: format, size, forceStatic: true }),
     ),

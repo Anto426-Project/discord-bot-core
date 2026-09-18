@@ -473,6 +473,7 @@ const guildProfile = (guild) => Object.freeze({
     premiumTier: responseBoundedInteger(guild.premiumTier, 0, 3, "Discord guild premium tier"),
     premiumSubscriptionCount: responseBoundedInteger(guild.premiumSubscriptionCount ?? 0, 0, MAXIMUM_GUILD_MEMBERS, "Discord guild premium subscription count"),
     createdAt: responseTimestamp(guild.createdAt, "Discord guild creation timestamp"),
+    rulesChannelId: responseNullableSnowflake(guild.rulesChannelId ?? null, "Discord guild rules channel id"),
     icon: materializeImageAsset((format, size) => guild.iconURL({ extension: format, size, forceStatic: true })),
     banner: materializeImageAsset((format, size) => guild.bannerURL({ extension: format, size, forceStatic: true })),
     splash: materializeImageAsset((format, size) => guild.splashURL({ extension: format, size, forceStatic: true })),
