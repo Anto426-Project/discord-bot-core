@@ -2220,6 +2220,14 @@ export class NodeDiscordGatewayAdapter {
             if (guild.id !== guildId) {
                 throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord guild response does not match the requested guild.", false);
             }
+            try {
+                if (guild.members && "fetchMe" in guild.members && typeof guild.members.fetchMe === "function") {
+                    await guild.members.fetchMe({ cache: true });
+                }
+            }
+            catch {
+                // Fallback or test environment
+            }
             const collection = await fetchGuildRoles(guild);
             const roles = [];
             const ids = new Set();

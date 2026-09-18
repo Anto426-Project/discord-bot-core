@@ -3471,6 +3471,13 @@ export class NodeDiscordGatewayAdapter
           false,
         );
       }
+      try {
+        if (guild.members && "fetchMe" in guild.members && typeof guild.members.fetchMe === "function") {
+          await guild.members.fetchMe({ cache: true });
+        }
+      } catch {
+        // Fallback or test environment
+      }
       const collection = await fetchGuildRoles(guild);
       const roles: DiscordGuildRoleSnapshot[] = [];
       const ids = new Set<string>();
