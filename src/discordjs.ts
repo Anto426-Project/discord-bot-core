@@ -698,7 +698,13 @@ const roleSnapshot = (role: Role, expectedGuildId: string): DiscordGuildRoleSnap
     position: responseBoundedInteger(role.position, 0, MAXIMUM_GUILD_ROLES, "Discord role position"),
     managed: responseBoolean(role.managed, "Discord role managed flag"),
     everyone: id === guildId,
-    editable: responseBoolean(role.editable, "Discord role editable flag"),
+    editable: (() => {
+      try {
+        return responseBoolean(role.editable, "Discord role editable flag");
+      } catch {
+        return false;
+      }
+    })(),
     permissions: Object.freeze(permissions),
   });
 };
@@ -3488,7 +3494,9 @@ export class NodeDiscordGatewayAdapter
       }
       try {
         if (guild.members && "fetchMe" in guild.members && typeof guild.members.fetchMe === "function") {
-          await guild.members.fetchMe({ cache: true });
+          await guild.members.fetchMe({ cache: true, force: true });
+        } else {
+          await fetchMemberOrNull(guild, guildResourceAgentUserId(client));
         }
       } catch {
         // Fallback or test environment
