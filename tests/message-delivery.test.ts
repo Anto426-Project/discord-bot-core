@@ -70,6 +70,35 @@ describe("Node Discord message delivery", () => {
     }
   });
 
+  it("passes file attachments to REST post", async () => {
+    const postDescriptor = Object.getOwnPropertyDescriptor(REST.prototype, "post");
+    assert.ok(postDescriptor);
+    let capturedFiles: unknown = undefined;
+    Object.defineProperty(REST.prototype, "post", {
+      ...postDescriptor,
+      async value(_route: string, options: { files?: unknown }): Promise<unknown> {
+        capturedFiles = options.files;
+        return { id: MESSAGE_ID, channel_id: CHANNEL_ID };
+      },
+    });
+
+    try {
+      const fileData = new Uint8Array([1, 2, 3, 4]);
+      await new NodeDiscordRestAdapter({ botToken: TEST_TOKEN }).sendChannelMessage({
+        channelId: CHANNEL_ID,
+        message: {
+          deliveryId: "delivery/file",
+          files: [{ name: "test.png", data: fileData, contentType: "image/png" }],
+        },
+      });
+
+      assert.ok(Array.isArray(capturedFiles));
+      assert.equal((capturedFiles as Array<{ name: string }>)[0]?.name, "test.png");
+    } finally {
+      Object.defineProperty(REST.prototype, "post", postDescriptor);
+    }
+  });
+
   it("classifies only Discord's explicit cannot-DM code as recipient unreachable", async () => {
     const postDescriptor = Object.getOwnPropertyDescriptor(REST.prototype, "post");
     assert.ok(postDescriptor);

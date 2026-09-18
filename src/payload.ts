@@ -41,12 +41,20 @@ export interface DiscordAllowedMentionsInput {
   readonly repliedUser?: boolean;
 }
 
+export type DiscordMessageFileAttachment = Readonly<{
+  name: string;
+  data: Uint8Array;
+  contentType?: string;
+  description?: string;
+}>;
+
 /** Provider-neutral message requested by a bot product. */
 export interface DiscordMessagePlan {
   readonly content?: string;
   readonly embeds?: readonly EmbedPlan[];
   readonly components?: readonly DiscordMessageActionRow[];
   readonly allowedMentions?: DiscordAllowedMentionsInput;
+  readonly files?: readonly DiscordMessageFileAttachment[];
 }
 
 /** Delivery-scoped message input used to derive a deterministic provider nonce. */
@@ -476,10 +484,11 @@ export const createSafeDiscordMessage = (
   }
   const embeds = encodeSafeDiscordEmbeds(input.embeds);
   const components = encodeSafeDiscordActionRows(input.components);
-  if (content === undefined && embeds.length === 0 && (components?.length ?? 0) === 0) {
+  const hasFiles = Array.isArray(input.files) && input.files.length > 0;
+  if (content === undefined && embeds.length === 0 && (components?.length ?? 0) === 0 && !hasFiles) {
     throw new DiscordCoreError(
       "DISCORD_PAYLOAD_REJECTED",
-      "Discord message requires content, an embed or a component.",
+      "Discord message requires content, an embed, a component or an attachment.",
       false,
     );
   }

@@ -23,6 +23,8 @@ export type DiscordUserProfile = Readonly<{
   bot: boolean;
   createdAt: string;
   avatar: DiscordImageAsset;
+  banner: DiscordImageAsset | null;
+  accentColor: number | null;
 }>;
 
 export type DiscordMemberProfile = Readonly<{

@@ -32,12 +32,19 @@ export interface DiscordAllowedMentionsInput {
     readonly roles?: readonly string[];
     readonly repliedUser?: boolean;
 }
+export type DiscordMessageFileAttachment = Readonly<{
+    name: string;
+    data: Uint8Array;
+    contentType?: string;
+    description?: string;
+}>;
 /** Provider-neutral message requested by a bot product. */
 export interface DiscordMessagePlan {
     readonly content?: string;
     readonly embeds?: readonly EmbedPlan[];
     readonly components?: readonly DiscordMessageActionRow[];
     readonly allowedMentions?: DiscordAllowedMentionsInput;
+    readonly files?: readonly DiscordMessageFileAttachment[];
 }
 /** Delivery-scoped message input used to derive a deterministic provider nonce. */
 export interface SafeDiscordMessageInput extends DiscordMessagePlan {

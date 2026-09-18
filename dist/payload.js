@@ -282,8 +282,9 @@ export const createSafeDiscordMessage = (input, destinationId) => {
     }
     const embeds = encodeSafeDiscordEmbeds(input.embeds);
     const components = encodeSafeDiscordActionRows(input.components);
-    if (content === undefined && embeds.length === 0 && (components?.length ?? 0) === 0) {
-        throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord message requires content, an embed or a component.", false);
+    const hasFiles = Array.isArray(input.files) && input.files.length > 0;
+    if (content === undefined && embeds.length === 0 && (components?.length ?? 0) === 0 && !hasFiles) {
+        throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Discord message requires content, an embed, a component or an attachment.", false);
     }
     const users = uniqueSnowflakes(input.allowedMentions?.users, "allowed mention user");
     const roles = uniqueSnowflakes(input.allowedMentions?.roles, "allowed mention role");

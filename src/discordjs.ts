@@ -658,6 +658,15 @@ const userImageAsset = (user: User): DiscordImageAsset => {
   return asset;
 };
 
+const userBannerAsset = (user: User): DiscordImageAsset | null => {
+  if (user.banner === null || user.banner === undefined) {
+    return null;
+  }
+  return materializeImageAsset((format, size) =>
+    user.bannerURL({ extension: format, size, forceStatic: true }) ?? null,
+  );
+};
+
 const GUILD_PERMISSION_FLAGS = Object.freeze([
   ["administrator", PermissionFlagsBits.Administrator],
   ["manage_guild", PermissionFlagsBits.ManageGuild],
@@ -846,6 +855,8 @@ const userProfile = (user: User): DiscordUserProfile =>
     bot: responseBoolean(user.bot, "Discord user bot flag"),
     createdAt: responseTimestamp(user.createdAt, "Discord user creation timestamp"),
     avatar: userImageAsset(user),
+    banner: userBannerAsset(user),
+    accentColor: typeof user.accentColor === "number" ? user.accentColor : null,
   });
 
 const memberProfile = (member: GuildMember, expectedGuildId: string): DiscordMemberProfile => {
@@ -3811,9 +3822,12 @@ export class NodeDiscordGatewayAdapter
         const cached = client.users.cache.get(userId);
         if (mode === "cache") return cached === undefined ? null : userProfile(cached);
         const user =
-          mode === "cache_or_fetch" && cached !== undefined
+          mode === "cache_or_fetch" && cached !== undefined && cached.banner !== undefined
             ? cached
-            : await client.users.fetch(userId, { cache: true, force: mode === "provider" });
+            : await client.users.fetch(userId, {
+                cache: true,
+                force: mode === "provider" || cached?.banner === undefined,
+              });
         return userProfile(user);
       } catch (error: unknown) {
         if (isProviderNotFoundError(error)) return null;
@@ -5827,10 +5841,19 @@ export class NodeDiscordRestAdapter
     classifyRecipientUnreachable: boolean,
     rest: REST = this.#restProvider(),
   ): Promise<DiscordDeliveryReceipt> {
+    const files =
+      Array.isArray(message.files) && message.files.length > 0
+        ? message.files.map((file) => ({
+            name: file.name,
+            data: Buffer.from(file.data),
+            ...(file.contentType === undefined ? {} : { contentType: file.contentType }),
+          }))
+        : undefined;
     let response: unknown;
     try {
       response = await rest.post(Routes.channelMessages(channelId), {
         body: createSafeDiscordMessage(message, channelId),
+        ...(files === undefined ? {} : { files }),
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error: unknown) {

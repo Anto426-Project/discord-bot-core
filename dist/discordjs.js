@@ -301,6 +301,12 @@ const userImageAsset = (user) => {
     }
     return asset;
 };
+const userBannerAsset = (user) => {
+    if (user.banner === null || user.banner === undefined) {
+        return null;
+    }
+    return materializeImageAsset((format, size) => user.bannerURL({ extension: format, size, forceStatic: true }) ?? null);
+};
 const GUILD_PERMISSION_FLAGS = Object.freeze([
     ["administrator", PermissionFlagsBits.Administrator],
     ["manage_guild", PermissionFlagsBits.ManageGuild],
@@ -433,6 +439,8 @@ const userProfile = (user) => Object.freeze({
     bot: responseBoolean(user.bot, "Discord user bot flag"),
     createdAt: responseTimestamp(user.createdAt, "Discord user creation timestamp"),
     avatar: userImageAsset(user),
+    banner: userBannerAsset(user),
+    accentColor: typeof user.accentColor === "number" ? user.accentColor : null,
 });
 const memberProfile = (member, expectedGuildId) => {
     const snapshot = memberSnapshot(member, expectedGuildId);
@@ -2437,9 +2445,12 @@ export class NodeDiscordGatewayAdapter {
                 const cached = client.users.cache.get(userId);
                 if (mode === "cache")
                     return cached === undefined ? null : userProfile(cached);
-                const user = mode === "cache_or_fetch" && cached !== undefined
+                const user = mode === "cache_or_fetch" && cached !== undefined && cached.banner !== undefined
                     ? cached
-                    : await client.users.fetch(userId, { cache: true, force: mode === "provider" });
+                    : await client.users.fetch(userId, {
+                        cache: true,
+                        force: mode === "provider" || cached?.banner === undefined,
+                    });
                 return userProfile(user);
             }
             catch (error) {
@@ -3715,10 +3726,18 @@ export class NodeDiscordRestAdapter {
         return this.sendMessageToChannel(channelId, input.message, input.signal, false);
     }
     async sendMessageToChannel(channelId, message, signal, classifyRecipientUnreachable, rest = this.#restProvider()) {
+        const files = Array.isArray(message.files) && message.files.length > 0
+            ? message.files.map((file) => ({
+                name: file.name,
+                data: Buffer.from(file.data),
+                ...(file.contentType === undefined ? {} : { contentType: file.contentType }),
+            }))
+            : undefined;
         let response;
         try {
             response = await rest.post(Routes.channelMessages(channelId), {
                 body: createSafeDiscordMessage(message, channelId),
+                ...(files === undefined ? {} : { files }),
                 ...(signal === undefined ? {} : { signal }),
             });
         }
