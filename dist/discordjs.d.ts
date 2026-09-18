@@ -11,7 +11,7 @@ import type { DiscordInteraction, DiscordInteractionListener } from "./interacti
 import type { DiscordBanMemberInput, DiscordDeleteRecentMessagesInput, DiscordKickMemberInput, DiscordMemberModerationReceipt, DiscordMessageCleanupReceipt, DiscordModerationActorFacts, DiscordModerationActorFactsInput, DiscordModerationChannelFactsInput, DiscordModerationMemberFacts, DiscordModerationMemberFactsInput, DiscordModerationPort, DiscordUnbanMemberInput } from "./moderation.js";
 import type { DiscordPresencePlan, DiscordPresencePort } from "./presence.js";
 import type { DiscordGuildProfile, DiscordGuildProfileReadInput, DiscordMemberProfile, DiscordMemberProfileReadInput, DiscordProfileQueryPort, DiscordUserProfile, DiscordUserProfileReadInput } from "./profiles.js";
-import type { DiscordVoiceRoomCreateInput, DiscordVoiceRoomDeleteInput, DiscordVoiceRoomDeleteOverwriteInput, DiscordVoiceRoomMoveMemberInput, DiscordVoiceRoomOperationReceipt, DiscordVoiceRoomPort, DiscordVoiceRoomUpdateInput, DiscordVoiceRoomUpsertOverwriteInput } from "./voice-rooms.js";
+import type { DiscordVoiceRoomCreateInput, DiscordVoiceGeneratorDeprovisionInput, DiscordVoiceGeneratorDeprovisionReceipt, DiscordVoiceGeneratorProvisionInput, DiscordVoiceGeneratorProvisionReceipt, DiscordVoiceRoomDeleteInput, DiscordVoiceRoomDeleteOverwriteInput, DiscordVoiceRoomMoveMemberInput, DiscordVoiceRoomOperationReceipt, DiscordVoiceRoomPort, DiscordVoiceRoomUpdateInput, DiscordVoiceRoomUpsertOverwriteInput } from "./voice-rooms.js";
 export type DiscordPrivilegedGatewayIntent = "GuildMembers" | "GuildPresences" | "MessageContent";
 export declare const DISCORD_GATEWAY_INTENTS: readonly ["Guilds", "GuildMembers", "GuildModeration", "GuildExpressions", "GuildIntegrations", "GuildWebhooks", "GuildInvites", "GuildVoiceStates", "GuildPresences", "GuildMessages", "GuildMessageReactions", "GuildMessageTyping", "DirectMessages", "DirectMessageReactions", "DirectMessageTyping", "MessageContent", "GuildScheduledEvents", "AutoModerationConfiguration", "AutoModerationExecution", "GuildMessagePolls", "DirectMessagePolls"];
 export type DiscordGatewayIntent = (typeof DISCORD_GATEWAY_INTENTS)[number];
@@ -102,6 +102,8 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     updateRule(input: DiscordNativeAutoModUpdateInput): Promise<DiscordNativeAutoModMutationReceipt>;
     deleteRule(input: DiscordNativeAutoModDeleteInput): Promise<DiscordNativeAutoModMutationReceipt>;
     createRoom(input: DiscordVoiceRoomCreateInput): Promise<DiscordVoiceRoomOperationReceipt>;
+    provisionGenerator(input: DiscordVoiceGeneratorProvisionInput): Promise<DiscordVoiceGeneratorProvisionReceipt>;
+    deprovisionGenerator(input: DiscordVoiceGeneratorDeprovisionInput): Promise<DiscordVoiceGeneratorDeprovisionReceipt>;
     moveMember(input: DiscordVoiceRoomMoveMemberInput): Promise<DiscordVoiceRoomOperationReceipt>;
     updateRoom(input: DiscordVoiceRoomUpdateInput): Promise<DiscordVoiceRoomOperationReceipt>;
     upsertPermissionOverwrite(input: DiscordVoiceRoomUpsertOverwriteInput): Promise<DiscordVoiceRoomOperationReceipt>;

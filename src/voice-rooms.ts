@@ -85,11 +85,51 @@ export type DiscordVoiceRoomDeleteInput = Readonly<{
   signal?: AbortSignal;
 }>;
 
+export type DiscordVoiceGeneratorProvisionInput = Readonly<{
+  operationId: string;
+  guildId: string;
+  categoryName?: string;
+  channelName?: string;
+  auditReason: string;
+  signal?: AbortSignal;
+}>;
+
+export type DiscordVoiceGeneratorProvisionReceipt = Readonly<{
+  operationId: string;
+  status: "applied";
+  guildId: string;
+  categoryChannelId: string;
+  categoryChannelName: string;
+  generatorChannelId: string;
+  generatorChannelName: string;
+}>;
+
+export type DiscordVoiceGeneratorDeprovisionInput = Readonly<{
+  operationId: string;
+  guildId: string;
+  generatorChannelId?: string;
+  categoryChannelId?: string;
+  auditReason: string;
+  signal?: AbortSignal;
+}>;
+
+export type DiscordVoiceGeneratorDeprovisionReceipt = Readonly<{
+  operationId: string;
+  status: "applied";
+  guildId: string;
+}>;
+
 /** Technical voice-channel mutations; product workflow is intentionally absent. */
 export interface DiscordVoiceRoomPort {
   createRoom(
     input: DiscordVoiceRoomCreateInput,
   ): Promise<DiscordVoiceRoomOperationReceipt>;
+  provisionGenerator(
+    input: DiscordVoiceGeneratorProvisionInput,
+  ): Promise<DiscordVoiceGeneratorProvisionReceipt>;
+  deprovisionGenerator(
+    input: DiscordVoiceGeneratorDeprovisionInput,
+  ): Promise<DiscordVoiceGeneratorDeprovisionReceipt>;
   moveMember(
     input: DiscordVoiceRoomMoveMemberInput,
   ): Promise<DiscordVoiceRoomOperationReceipt>;

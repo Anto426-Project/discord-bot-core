@@ -2897,6 +2897,87 @@ export class NodeDiscordGatewayAdapter {
             });
         });
     }
+    async provisionGenerator(input) {
+        const operationId = inputOperationId(input, "Discord voice generator provision operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice generator provision input"), "Discord guild id");
+        const auditReason = inputAuditReason(input, "Discord voice generator provision audit reason");
+        const signal = inputSignalFrom(input, "Discord voice generator provision");
+        const categoryName = input.categoryName?.trim() || "🔊 Canali Temporanei";
+        const channelName = input.channelName?.trim() || "➕ Crea Stanza";
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            await guild.channels.fetch();
+            let category = guild.channels.cache.find((ch) => ch.type === ChannelType.GuildCategory &&
+                ch.name.toLowerCase() === categoryName.toLowerCase());
+            if (!category) {
+                category = await guild.channels.create({
+                    name: categoryName,
+                    type: ChannelType.GuildCategory,
+                    reason: auditReason,
+                });
+            }
+            let channel = guild.channels.cache.find((ch) => ch.type === ChannelType.GuildVoice &&
+                ch.parentId === category.id &&
+                ch.name.toLowerCase() === channelName.toLowerCase());
+            if (!channel) {
+                channel = await guild.channels.create({
+                    name: channelName,
+                    type: ChannelType.GuildVoice,
+                    parent: category.id,
+                    userLimit: 0,
+                    reason: auditReason,
+                });
+            }
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+                categoryChannelId: responseSnowflake(category.id, "Discord category id"),
+                categoryChannelName: category.name,
+                generatorChannelId: responseSnowflake(channel.id, "Discord generator channel id"),
+                generatorChannelName: channel.name,
+            });
+        });
+    }
+    async deprovisionGenerator(input) {
+        const operationId = inputOperationId(input, "Discord voice generator deprovision operation id");
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice generator deprovision input"), "Discord guild id");
+        const auditReason = inputAuditReason(input, "Discord voice generator deprovision audit reason");
+        const signal = inputSignalFrom(input, "Discord voice generator deprovision");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            if (input.generatorChannelId) {
+                try {
+                    const ch = await guild.channels.fetch(input.generatorChannelId);
+                    if (ch)
+                        await ch.delete(auditReason);
+                }
+                catch {
+                    // Channel already deleted
+                }
+            }
+            if (input.categoryChannelId) {
+                try {
+                    const cat = await guild.channels.fetch(input.categoryChannelId);
+                    if (cat && cat.type === ChannelType.GuildCategory) {
+                        await guild.channels.fetch();
+                        const children = guild.channels.cache.filter((c) => c.parentId === cat.id);
+                        if (children.size === 0) {
+                            await cat.delete(auditReason);
+                        }
+                    }
+                }
+                catch {
+                    // Category already deleted
+                }
+            }
+            return Object.freeze({
+                operationId,
+                status: "applied",
+                guildId,
+            });
+        });
+    }
     async moveMember(input) {
         const operationId = inputOperationId(input, "Discord voice-room move operation id");
         const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord voice-room move input"), "Discord guild id");
