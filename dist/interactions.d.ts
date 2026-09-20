@@ -1,3 +1,4 @@
+import type { CommandPermission } from "./command-model.js";
 import type { EmbedPlan } from "../vendor/dynamic-embed-engine/dist/index.js";
 import type { DiscordMessageActionRow, DiscordModalPlan } from "./components.js";
 export type DiscordResponseVisibility = "public" | "ephemeral";
@@ -55,6 +56,8 @@ export type DiscordInteractionBase = Readonly<{
     bot: DiscordInteractionBot;
     createdAt: string;
     responder: DiscordInteractionResponder;
+    /** Effective permissions in this interaction context; absent facts grant nothing. */
+    memberPermissions?: readonly CommandPermission[];
 }>;
 export type DiscordChatInputInteraction = DiscordInteractionBase & Readonly<{
     kind: "chat_input";

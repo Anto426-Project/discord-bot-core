@@ -114,3 +114,13 @@ the core itself.
 npm ci
 npm run ci
 ```
+
+Shared bot services are exposed through explicit package entry points:
+
+- `./localization`: validated catalogs and template translation.
+- `./presentation`: embed plans, formatting and colors backed by Dynamic Embed Engine.
+- `./observability`: structured operational logging, redaction and console sinks.
+- `./runtime`: bounded polling supervisors with shutdown draining.
+- `./node-storage`: optional SQLite command ownership persistence for standalone consumers.
+
+The root entry point also provides feedback modals, interaction acknowledgement and response delivery, role management ports, and verified command ownership migration. Product catalogs, authorization decisions and business persistence remain in consumers. Bots with centralized storage implement `DiscordCommandPublicationSnapshotPort` using their service API.

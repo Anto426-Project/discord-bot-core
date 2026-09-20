@@ -1030,3 +1030,5 @@ export class InMemoryDiscordCommandPublicationSnapshotAdapter
     }
   }
 }
+
+export const assertDiscordCommandPublicationSnapshot = assertSnapshotIntegrity;

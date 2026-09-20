@@ -100,6 +100,7 @@ export type DiscordCommandPublicationOptions = Readonly<{
 export declare const fingerprintDiscordCommand: (value: unknown) => string;
 /** Normalizes provider defaults before comparing a remote chat-input command. */
 export declare const fingerprintDiscordChatInputCommand: (value: unknown, placement: DiscordCommandPublicationScope["kind"]) => string;
+declare const assertSnapshotIntegrity: (snapshot: DiscordCommandPublicationSnapshot, scope: DiscordCommandPublicationScope) => void;
 export declare class DiscordCommandPublisher {
     private readonly rest;
     private readonly snapshots;
@@ -116,5 +117,6 @@ export declare class InMemoryDiscordCommandPublicationSnapshotAdapter implements
     values(): readonly DiscordCommandPublicationSnapshot[];
     private assertLease;
 }
+export declare const assertDiscordCommandPublicationSnapshot: typeof assertSnapshotIntegrity;
 export {};
 //# sourceMappingURL=command-publisher.d.ts.map

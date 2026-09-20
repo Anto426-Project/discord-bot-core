@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import {
   cpSync,
@@ -17,7 +18,7 @@ const npmEnvironment = Object.freeze({
   ...process.env,
   npm_config_cache: path.join(temporary, "npm-cache"),
 });
-const localProviderSdk = path.resolve("node_modules", "discord.js");
+const localProviderSdk = path.dirname(path.dirname(createRequire(import.meta.url).resolve("discord.js")));
 const seedLocalProviderSdk = (consumer) => {
   const modules = path.join(consumer, "node_modules");
   mkdirSync(modules, { recursive: true });
@@ -71,6 +72,13 @@ try {
         createNodeDiscordProviderExtension,
         createNodeDiscordRuntime,
       } from "@anto-project/discord-bot-core/node";
+      const { PollingSupervisor } = await import("@anto-project/discord-bot-core/runtime");
+      const { OperationalLogger } = await import("@anto-project/discord-bot-core/observability");
+      const { createLocalizationCatalog } = await import("@anto-project/discord-bot-core/localization");
+      const { EmbedPlanBuilder: PresentationBuilder } = await import("@anto-project/discord-bot-core/presentation");
+      const { SqliteDiscordCommandPublicationSnapshotAdapter } = await import("@anto-project/discord-bot-core/node-storage");
+      if (![PollingSupervisor, OperationalLogger, createLocalizationCatalog, PresentationBuilder].every(x => typeof x === "function")) throw new Error("shared exports failed");
+      const storage = new SqliteDiscordCommandPublicationSnapshotAdapter(":memory:"); storage.close();
       const embed = EmbedPlanBuilder.info({ locale: "en" }).description("ok").build();
       const row = discordMessageActionRow([
         discordButton({ style: "primary", label: "OK", customId: "smoke:ok" }),

@@ -1,3 +1,4 @@
+import type { DiscordCreateStandardRoleInput, DiscordGuildRoleManagementPort } from "./guild-role-management.js";
 import type { DiscordAutoModOperationReceipt, DiscordBotAutoModDeleteMessageInput, DiscordBotAutoModPort, DiscordBotAutoModTimeoutMemberInput, DiscordNativeAutoModCreateInput, DiscordNativeAutoModDeleteInput, DiscordNativeAutoModListInput, DiscordNativeAutoModMutationReceipt, DiscordNativeAutoModPort, DiscordNativeAutoModReadInput, DiscordNativeAutoModRuleSnapshot, DiscordNativeAutoModUpdateInput } from "./automod.js";
 import type { DiscordApplicationCommandBody } from "./command-model.js";
 import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublicationScope, type DiscordRemoteApplicationCommand } from "./command-publisher.js";
@@ -75,6 +76,7 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
     subscribeInteractions(listener: DiscordInteractionListener): () => void;
     subscribe(listener: DiscordGatewayEventListener): () => void;
     capture(): DiscordGatewayInspectionSnapshot;
+    createStandardRole(input: DiscordCreateStandardRoleInput): Promise<DiscordGuildRoleSnapshot>;
     listRoles(input: DiscordGuildRoleListInput): Promise<readonly DiscordGuildRoleSnapshot[]>;
     listMembers(input: DiscordGuildMemberListInput): Promise<DiscordGuildMemberPage>;
     readGuildMember(input: DiscordGuildMemberReadInput): Promise<DiscordGuildMemberSnapshot | null>;
@@ -145,6 +147,7 @@ export type NodeDiscordRuntimeServices = Readonly<{
     inspection: DiscordGatewayInspectionPort;
     guilds: DiscordGuildDirectoryPort;
     guildResources: DiscordGuildResourcePort;
+    roleManagement: DiscordGuildRoleManagementPort;
     profiles: DiscordProfileQueryPort;
     presence: DiscordPresencePort;
     events: DiscordGatewayEventPort;

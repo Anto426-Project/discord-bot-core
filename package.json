@@ -17,6 +17,26 @@
     "./node": {
       "types": "./dist/discordjs.d.ts",
       "default": "./dist/discordjs.js"
+    },
+    "./localization": {
+      "types": "./dist/localization/index.d.ts",
+      "default": "./dist/localization/index.js"
+    },
+    "./presentation": {
+      "types": "./dist/presentation/index.d.ts",
+      "default": "./dist/presentation/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "default": "./dist/observability/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "default": "./dist/runtime/index.js"
+    },
+    "./node-storage": {
+      "types": "./dist/node-storage.d.ts",
+      "default": "./dist/node-storage.js"
     }
   },
   "files": [

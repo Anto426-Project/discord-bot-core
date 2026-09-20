@@ -23,3 +23,7 @@ export * from "./profiles.js";
 export * from "./retry.js";
 export * from "./router.js";
 export * from "./voice-rooms.js";
+export * from "./interaction-response.js";
+export * from "./feedback.js";
+export * from "./guild-role-management.js";
+export * from "./command-ownership.js";

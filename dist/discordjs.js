@@ -426,6 +426,7 @@ const guildChannelSnapshot = (channel, agent, expectedGuildId) => {
         voiceBased: responseBoolean(channel.isVoiceBased(), "Discord channel voice-based flag"),
         agentCanView: permissions.has(PermissionFlagsBits.ViewChannel),
         agentCanSendMessages: permissions.has(PermissionFlagsBits.SendMessages),
+        agentCanManageChannels: permissions.has(PermissionFlagsBits.ManageChannels),
         agentCanEmbedLinks: permissions.has(PermissionFlagsBits.EmbedLinks),
         agentCanAttachFiles: permissions.has(PermissionFlagsBits.AttachFiles),
     });
@@ -1429,6 +1430,13 @@ const interactionBase = (interaction) => Object.freeze({
     guild: interactionGuild(interaction),
     bot: interactionBot(interaction),
     createdAt: interaction.createdAt.toISOString(),
+    memberPermissions: Object.freeze([
+        ["administrator", PermissionFlagsBits.Administrator], ["manage_channels", PermissionFlagsBits.ManageChannels],
+        ["manage_guild", PermissionFlagsBits.ManageGuild], ["manage_roles", PermissionFlagsBits.ManageRoles],
+        ["manage_messages", PermissionFlagsBits.ManageMessages], ["moderate_members", PermissionFlagsBits.ModerateMembers],
+        ["ban_members", PermissionFlagsBits.BanMembers], ["kick_members", PermissionFlagsBits.KickMembers],
+        ["view_audit_log", PermissionFlagsBits.ViewAuditLog]
+    ].filter(([, bit]) => interaction.memberPermissions?.has(bit) === true).map(([name]) => name)),
     responder: new NodeDiscordInteractionResponder(interaction),
 });
 const commandOptions = (interaction) => Object.freeze({
@@ -2227,6 +2235,22 @@ export class NodeDiscordGatewayAdapter {
             voiceChannelCount,
             guilds: Object.freeze(guilds),
         });
+    }
+    async createStandardRole(input) {
+        const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord role creation"), "Discord guild id");
+        const name = inputTextValue(inputDataProperty(input, "name", "Discord role creation"), 1, 100, "Discord role name");
+        const reason = inputAuditReason(input, "Discord role creation audit reason");
+        const signal = inputSignalFrom(input, "Discord role creation");
+        const deadline = inputDeadlineEpochMsFrom(input, "Discord role creation");
+        return this.#runCurrentClientMutation(signal, async (client) => {
+            const guild = await resolveGuild(client, guildId);
+            const agent = await fetchMemberOrNull(guild, guildResourceAgentUserId(client));
+            if (agent === null || !agent.permissions.has(PermissionFlagsBits.ManageRoles)) {
+                throw new DiscordCoreError("DISCORD_PROVIDER_FAILURE", "Discord role creation requires manage roles permission.", false, 403);
+            }
+            const role = await guild.roles.create({ name, permissions: [], mentionable: false, hoist: false, reason });
+            return roleSnapshot(role, guildId);
+        }, deadline);
     }
     async listRoles(input) {
         const guildId = inputSnowflake(inputDataProperty(input, "guildId", "Discord guild role-list input"), "Discord guild id");
@@ -3816,6 +3840,7 @@ export const createNodeDiscordRuntime = (options) => {
         inspection: gateway,
         guilds: gateway,
         guildResources: gateway,
+        roleManagement: gateway,
         profiles: gateway,
         presence: gateway,
         events: gateway,

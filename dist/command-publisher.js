@@ -627,4 +627,5 @@ export class InMemoryDiscordCommandPublicationSnapshotAdapter {
         }
     }
 }
+export const assertDiscordCommandPublicationSnapshot = assertSnapshotIntegrity;
 //# sourceMappingURL=command-publisher.js.map

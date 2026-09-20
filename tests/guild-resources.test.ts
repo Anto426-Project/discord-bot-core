@@ -305,6 +305,7 @@ describe("provider-neutral Discord guild resources", () => {
         voiceBased: false,
         agentCanView: true,
         agentCanSendMessages: true,
+        agentCanManageChannels: false,
         agentCanEmbedLinks: true,
         agentCanAttachFiles: true,
       });
