@@ -3802,6 +3802,51 @@ export class NodeDiscordRestAdapter {
         const channelId = parseDiscordSnowflake(responseString(responseRecord(response), "id", "Discord DM channel id"), "Discord DM channel id");
         return this.sendMessageToChannel(channelId, input.message, input.signal, true, rest);
     }
+    async editChannelMessage(input) {
+        const channelId = parseDiscordSnowflake(input.channelId, "Discord channel id");
+        const messageId = parseDiscordSnowflake(input.messageId, "Discord message id");
+        return this.editMessageInChannel(channelId, messageId, input.message, input.signal, false);
+    }
+    async editDirectMessage(input) {
+        const recipientId = parseDiscordSnowflake(input.recipientId, "Discord recipient id");
+        const messageId = parseDiscordSnowflake(input.messageId, "Discord message id");
+        const rest = this.#restProvider();
+        let response;
+        try {
+            response = await rest.post(Routes.userChannels(), {
+                body: Object.freeze({ recipient_id: recipientId }),
+                ...(input.signal === undefined ? {} : { signal: input.signal }),
+            });
+        }
+        catch (error) {
+            throw directMessageFailureForSignal(error, input.signal);
+        }
+        const channelId = parseDiscordSnowflake(responseString(responseRecord(response), "id", "Discord DM channel id"), "Discord DM channel id");
+        return this.editMessageInChannel(channelId, messageId, input.message, input.signal, true, rest);
+    }
+    async editMessageInChannel(channelId, messageId, message, signal, classifyRecipientUnreachable, rest = this.#restProvider()) {
+        if (message.files !== undefined && message.files.length > 0) {
+            throw new DiscordCoreError("DISCORD_PAYLOAD_REJECTED", "Message edits cannot attach files.", false);
+        }
+        const { nonce: _nonce, enforce_nonce: _enforceNonce, ...body } = createSafeDiscordMessage({ ...message, deliveryId: `edit:${messageId}` }, channelId);
+        let response;
+        try {
+            response = await rest.patch(Routes.channelMessage(channelId, messageId), {
+                body,
+                ...(signal === undefined ? {} : { signal }),
+            });
+        }
+        catch (error) {
+            throw classifyRecipientUnreachable
+                ? directMessageFailureForSignal(error, signal)
+                : providerFailureForSignal(error, signal);
+        }
+        const receipt = this.deliveryReceipt(response, channelId);
+        if (receipt.messageId !== messageId) {
+            throw new DiscordCoreError("DISCORD_RESPONSE_INVALID", "Discord edited a different message.", false);
+        }
+        return receipt;
+    }
     deliveryReceipt(value, expectedChannelId) {
         const record = responseRecord(value);
         const channelId = parseDiscordSnowflake(responseString(record, "channel_id", "Discord message channel id"), "Discord message channel id");

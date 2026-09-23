@@ -3,7 +3,7 @@ import type { DiscordAutoModOperationReceipt, DiscordBotAutoModDeleteMessageInpu
 import type { DiscordApplicationCommandBody } from "./command-model.js";
 import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublicationScope, type DiscordRemoteApplicationCommand } from "./command-publisher.js";
 import type { DiscordGatewayEventListener, DiscordGatewayEventPort } from "./gateway-events.js";
-import type { DiscordChannelMessageDelivery, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordMessageDeliveryPort } from "./delivery.js";
+import type { DiscordChannelMessageDelivery, DiscordChannelMessageEdit, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordDirectMessageEdit, DiscordMessageDeliveryPort, DiscordMessageEditingPort } from "./delivery.js";
 import type { DiscordGatewayIdentity, DiscordGatewayLifecycleListener, DiscordGatewayRuntimePort } from "./gateway.js";
 import type { DiscordGuildDirectoryPort, DiscordGuildMemberListInput, DiscordGuildMemberPage, DiscordGuildMemberSnapshot, DiscordGuildRoleListInput, DiscordGuildRoleSnapshot } from "./guild-directory.js";
 import type { DiscordGuildChannelReadInput, DiscordGuildChannelSnapshot, DiscordGuildMemberReadInput, DiscordGuildResourcePort, DiscordGuildRoleReadInput, DiscordMemberRoleMutationInput, DiscordMemberRoleMutationReceipt } from "./guild-resources.js";
@@ -121,7 +121,7 @@ export declare class NodeDiscordGatewayAdapter implements DiscordGatewayRuntimeP
  * bucket coordination, route queues and Retry-After waits; bot products never
  * depend on the provider library directly.
  */
-export declare class NodeDiscordRestAdapter implements DiscordApplicationCommandsRestPort, DiscordMessageDeliveryPort {
+export declare class NodeDiscordRestAdapter implements DiscordApplicationCommandsRestPort, DiscordMessageEditingPort {
     #private;
     constructor(options: NodeDiscordRestOptions);
     toJSON(): Readonly<{
@@ -134,6 +134,9 @@ export declare class NodeDiscordRestAdapter implements DiscordApplicationCommand
     sendChannelMessage(input: DiscordChannelMessageDelivery): Promise<DiscordDeliveryReceipt>;
     private sendMessageToChannel;
     sendDirectMessage(input: DiscordDirectMessageDelivery): Promise<DiscordDeliveryReceipt>;
+    editChannelMessage(input: DiscordChannelMessageEdit): Promise<DiscordDeliveryReceipt>;
+    editDirectMessage(input: DiscordDirectMessageEdit): Promise<DiscordDeliveryReceipt>;
+    private editMessageInChannel;
     private deliveryReceipt;
 }
 export interface NodeDiscordRuntimeOptions {

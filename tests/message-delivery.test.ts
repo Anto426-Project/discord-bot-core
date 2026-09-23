@@ -17,6 +17,42 @@ const RECIPIENT_ID = "223456789012345678";
 const MESSAGE_ID = "323456789012345678";
 
 describe("Node Discord message delivery", () => {
+  it("edits an existing panel without a send nonce and preserves disabled controls", async () => {
+    const patchDescriptor = Object.getOwnPropertyDescriptor(REST.prototype, "patch");
+    assert.ok(patchDescriptor);
+    const calls: Array<{ route: string; body: unknown }> = [];
+    Object.defineProperty(REST.prototype, "patch", {
+      ...patchDescriptor,
+      async value(route: string, options: { body?: unknown }): Promise<unknown> {
+        calls.push({ route, body: options.body });
+        return { id: MESSAGE_ID, channel_id: CHANNEL_ID };
+      },
+    });
+    try {
+      const receipt = await new NodeDiscordRestAdapter({ botToken: TEST_TOKEN }).editChannelMessage({
+        channelId: CHANNEL_ID,
+        messageId: MESSAGE_ID,
+        message: {
+          content: "This room has been deleted.",
+          components: [discordMessageActionRow([
+            discordButton({ style: "secondary", label: "Closed", customId: "room:closed", disabled: true }),
+          ])],
+        },
+      });
+      assert.deepEqual(receipt, { channelId: CHANNEL_ID, messageId: MESSAGE_ID });
+      assert.equal(calls[0]?.route, Routes.channelMessage(CHANNEL_ID, MESSAGE_ID));
+      assert.deepEqual(calls[0]?.body, {
+        content: "This room has been deleted.",
+        components: [{ type: 1, components: [{
+          type: 2, style: 2, label: "Closed", custom_id: "room:closed", disabled: true,
+        }] }],
+        allowed_mentions: { parse: [], users: [], roles: [], replied_user: false },
+      });
+    } finally {
+      Object.defineProperty(REST.prototype, "patch", patchDescriptor);
+    }
+  });
+
   it("encodes a provider-neutral message plan at the REST boundary", async () => {
     const postDescriptor = Object.getOwnPropertyDescriptor(REST.prototype, "post");
     assert.ok(postDescriptor);
