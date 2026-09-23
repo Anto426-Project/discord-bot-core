@@ -9,6 +9,8 @@ export type DiscordGuildChannelSnapshot = Readonly<{
     textBased: boolean;
     voiceBased: boolean;
     agentCanView: boolean;
+    agentCanConnect?: boolean;
+    agentCanSpeak?: boolean;
     agentCanManageChannels?: boolean;
     agentCanSendMessages: boolean;
     agentCanEmbedLinks: boolean;

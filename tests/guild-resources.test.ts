@@ -18,6 +18,7 @@ const APP_ID = "22345678901234567";
 const GUILD_ID = "32345678901234567";
 const USER_ID = "42345678901234567";
 const CHANNEL_ID = "52345678901234567";
+const VOICE_CHANNEL_ID = "53345678901234567";
 const ROLE_ID = "62345678901234567";
 const MANAGED_ROLE_ID = "72345678901234567";
 const HIGH_ROLE_ID = "82345678901234567";
@@ -154,6 +155,7 @@ describe("provider-neutral Discord guild resources", () => {
           displayName: "Student",
           nickname: null,
           joinedAt: new Date("2026-01-01T00:00:00.000Z"),
+          voice: { channelId: VOICE_CHANNEL_ID },
         };
         Object.assign(target, {
           roles: {
@@ -272,6 +274,7 @@ describe("provider-neutral Discord guild resources", () => {
         userId: USER_ID,
       });
       assert.deepEqual(member?.roleIds, [MEMBER_BASE_ROLE_ID, GUILD_ID]);
+      assert.equal(member?.voiceChannelId, VOICE_CHANNEL_ID);
       assert.ok(Object.isFrozen(member));
       assert.ok(Object.isFrozen(member?.roleIds));
       assert.equal(
@@ -304,6 +307,8 @@ describe("provider-neutral Discord guild resources", () => {
         textBased: true,
         voiceBased: false,
         agentCanView: true,
+        agentCanConnect: false,
+        agentCanSpeak: false,
         agentCanSendMessages: true,
         agentCanManageChannels: false,
         agentCanEmbedLinks: true,

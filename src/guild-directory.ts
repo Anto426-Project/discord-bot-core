@@ -28,6 +28,8 @@ export type DiscordGuildMemberSnapshot = Readonly<{
   joinedAt: string | null;
   bot: boolean;
   roleIds: readonly string[];
+  /** Live voice membership, when the provider supports voice state reads. */
+  voiceChannelId?: string | null;
 }>;
 
 export type DiscordGuildMemberPage = Readonly<{

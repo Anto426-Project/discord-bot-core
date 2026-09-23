@@ -381,6 +381,7 @@ const memberSnapshot = (member, expectedGuildId) => {
         joinedAt: responseNullableTimestamp(member.joinedAt, "Discord member join timestamp"),
         bot: responseBoolean(member.user.bot, "Discord member bot flag"),
         roleIds: memberRoleIds(member, guildId),
+        voiceChannelId: member.voice?.channelId ?? null,
     });
 };
 const guildChannelKind = (type) => {
@@ -425,6 +426,8 @@ const guildChannelSnapshot = (channel, agent, expectedGuildId) => {
         textBased: responseBoolean(channel.isTextBased(), "Discord channel text-based flag"),
         voiceBased: responseBoolean(channel.isVoiceBased(), "Discord channel voice-based flag"),
         agentCanView: permissions.has(PermissionFlagsBits.ViewChannel),
+        agentCanConnect: permissions.has(PermissionFlagsBits.Connect),
+        agentCanSpeak: permissions.has(PermissionFlagsBits.Speak),
         agentCanSendMessages: permissions.has(PermissionFlagsBits.SendMessages),
         agentCanManageChannels: permissions.has(PermissionFlagsBits.ManageChannels),
         agentCanEmbedLinks: permissions.has(PermissionFlagsBits.EmbedLinks),
