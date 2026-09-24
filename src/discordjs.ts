@@ -90,7 +90,6 @@ import type {
   DiscordDeliveryReceipt,
   DiscordDirectMessageDelivery,
   DiscordDirectMessageEdit,
-  DiscordMessageDeliveryPort,
   DiscordMessageEditingPort,
 } from "./delivery.js";
 import { DiscordCoreError } from "./errors.js";
@@ -6035,7 +6034,7 @@ export type NodeDiscordRuntimeServices = Readonly<{
   nativeAutoMod: DiscordNativeAutoModPort;
   voiceRooms: DiscordVoiceRoomPort;
   commands: DiscordApplicationCommandsRestPort;
-  messages: DiscordMessageDeliveryPort;
+  messages: DiscordMessageEditingPort;
 }>;
 
 /**

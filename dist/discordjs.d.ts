@@ -3,7 +3,7 @@ import type { DiscordAutoModOperationReceipt, DiscordBotAutoModDeleteMessageInpu
 import type { DiscordApplicationCommandBody } from "./command-model.js";
 import { type DiscordApplicationCommandsRestPort, type DiscordCommandPublicationScope, type DiscordRemoteApplicationCommand } from "./command-publisher.js";
 import type { DiscordGatewayEventListener, DiscordGatewayEventPort } from "./gateway-events.js";
-import type { DiscordChannelMessageDelivery, DiscordChannelMessageEdit, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordDirectMessageEdit, DiscordMessageDeliveryPort, DiscordMessageEditingPort } from "./delivery.js";
+import type { DiscordChannelMessageDelivery, DiscordChannelMessageEdit, DiscordDeliveryReceipt, DiscordDirectMessageDelivery, DiscordDirectMessageEdit, DiscordMessageEditingPort } from "./delivery.js";
 import type { DiscordGatewayIdentity, DiscordGatewayLifecycleListener, DiscordGatewayRuntimePort } from "./gateway.js";
 import type { DiscordGuildDirectoryPort, DiscordGuildMemberListInput, DiscordGuildMemberPage, DiscordGuildMemberSnapshot, DiscordGuildRoleListInput, DiscordGuildRoleSnapshot } from "./guild-directory.js";
 import type { DiscordGuildChannelReadInput, DiscordGuildChannelSnapshot, DiscordGuildMemberReadInput, DiscordGuildResourcePort, DiscordGuildRoleReadInput, DiscordMemberRoleMutationInput, DiscordMemberRoleMutationReceipt } from "./guild-resources.js";
@@ -159,7 +159,7 @@ export type NodeDiscordRuntimeServices = Readonly<{
     nativeAutoMod: DiscordNativeAutoModPort;
     voiceRooms: DiscordVoiceRoomPort;
     commands: DiscordApplicationCommandsRestPort;
-    messages: DiscordMessageDeliveryPort;
+    messages: DiscordMessageEditingPort;
 }>;
 /**
  * Composes one SDK-owned gateway and one SDK-owned REST coordinator behind
